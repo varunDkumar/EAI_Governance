@@ -1,0 +1,60 @@
+@import "tailwindcss";
+
+:root {
+  --color-primary: #4c1d95; /* deep violet */
+  --color-primary-hover: #5b21b6;
+  --color-secondary: #3730a3; /* indigo */
+  --color-navy: #1e1b4b;
+  --color-accent: #2563eb; /* electric blue */
+  --color-success: #4d7c66; /* muted green */
+  --color-warning: #b45309; /* amber */
+  --color-danger: #b91c1c;
+  --color-bg: #f6f5f8; /* off-white / light grey */
+  --color-surface: #ffffff;
+  --color-border: #e3e1ec;
+  --color-text: #1f1b2e;
+  --color-text-muted: #6b6578;
+}
+
+:root[data-theme="dark"] {
+  --color-primary: #a78bfa;
+  --color-primary-hover: #c4b5fd;
+  --color-secondary: #818cf8;
+  --color-navy: #0f0c29;
+  --color-accent: #60a5fa;
+  --color-success: #6ee7b7;
+  --color-warning: #fbbf24;
+  --color-danger: #f87171;
+  --color-bg: #15131f; /* deep charcoal */
+  --color-surface: #1e1b2e;
+  --color-border: #322d45;
+  --color-text: #ece9f5;
+  --color-text-muted: #a39cb8;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background-color: var(--color-bg);
+  color: var(--color-text);
+}
+
+/* Governance Simulator: a professional enterprise-healthcare palette,
+   distinct from the Memory Intelligence product's violet brand. */
+.sim-theme {
+  --sim-navy: #0b3d5c;
+  --sim-navy-dark: #072a40;
+  --sim-teal: #0d9488;
+  --sim-teal-light: #ccfbf1;
+  --sim-bg: #f7f9fb;
+}
