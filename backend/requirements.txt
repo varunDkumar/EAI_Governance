@@ -1,0 +1,16 @@
+fastapi
+uvicorn[standard]
+sqlalchemy
+python-dotenv
+pydantic
+google-genai
+pymupdf==1.24.14
+python-docx
+python-pptx
+openpyxl
+pandas
+xlrd
+chromadb
+fastembed
+pytesseract
+Pillow

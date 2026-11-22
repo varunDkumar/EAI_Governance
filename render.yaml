@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: agent-trust-fabric-simulator
+    runtime: python
+    plan: free
+    rootDir: backend
+    buildCommand: pip install -r requirements-public.txt
+    startCommand: python -m uvicorn public_main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: ATF_PUBLIC_CORS_ORIGINS
+        value: ""

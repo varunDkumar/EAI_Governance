@@ -175,11 +175,13 @@ function SectionTitle({ children, caption }: { children: ReactNode; caption?: st
   );
 }
 
+const PUBLIC_MODE = import.meta.env.VITE_PUBLIC_MODE === "true";
+
 function Header() {
   return (
     <header className="flex items-center justify-between border-b bg-white px-7 py-4" style={{ borderColor: "var(--color-border)" }}>
       <div>
-        <Link to="/" className="text-xs font-semibold" style={{ color: "var(--sim-teal)" }}>← All products</Link>
+        {!PUBLIC_MODE && <Link to="/" className="text-xs font-semibold" style={{ color: "var(--sim-teal)" }}>← All products</Link>}
         <div className="mt-1 flex items-center gap-2 text-lg font-semibold" style={{ color: "var(--sim-navy)" }}>
           Governance Simulator
           <span className="rounded-full px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-white" style={{ background: "var(--sim-teal)" }}>CNE protocol</span>

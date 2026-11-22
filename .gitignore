@@ -1,0 +1,36 @@
+# Node
+node_modules/
+dist/
+app/dist/
+app/src-tauri/target/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+backend/.venv/
+backend/build/
+backend/*.spec
+app/src-tauri/binaries/
+
+# App data (local-first, not for VCS)
+backend/data/
+*.db
+chroma/
+
+# Env
+.env
+.env.local
+
+# OS
+.DS_Store
+
+# Rust
+target/
+
+# Real IIM-A course material (copyrighted, course-license only — never in VCS)
+moodle-bak/
+
+# Third-party reference projects (not ours to redistribute)
+VedAnvaya-main/
+obsidian-knowledge-graph-master/

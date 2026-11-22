@@ -1,0 +1,9 @@
+# Dependencies for the public Governance Simulator deployment only
+# (backend/public_main.py). Deliberately excludes everything the Memory
+# Intelligence stack needs (fastembed, chromadb, pymupdf, pandas, Pillow,
+# pytesseract, google-genai) — the simulator has zero LLM calls and touches
+# no document-ingestion code, so none of that is ever imported here.
+fastapi
+uvicorn[standard]
+sqlalchemy
+pydantic
