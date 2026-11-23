@@ -25,6 +25,65 @@ const BACKEND_ORIGIN = API_BASE;
 type Point = { x: number; y: number; vx: number; vy: number };
 type View = { x: number; y: number; scale: number };
 type Direction = "both" | "outgoing" | "incoming";
+type DisplaySettings = {
+  nodeSizeScale: number;
+  nodeOpacity: number;
+  edgeWidth: number;
+  edgeOpacity: number;
+  showArrows: boolean;
+  showLabels: boolean;
+  labelFontSize: number;
+};
+const DEFAULT_SETTINGS: DisplaySettings = {
+  nodeSizeScale: 1, nodeOpacity: 1, edgeWidth: 1, edgeOpacity: 1, showArrows: true, showLabels: true, labelFontSize: 1,
+};
+type ColorGroup = { id: string; name: string; query: string; color: string; enabled: boolean };
+
+function loadPersisted<T>(key: string, fallback: T): T {
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return fallback;
+    const parsed = JSON.parse(raw);
+    return parsed ?? fallback;
+  } catch { return fallback; }
+}
+// A small query language shared by the search box, the canvas filter and
+// custom colour groups: bare words match the label; "field:value" (or
+// "-field:value" to exclude) matches one of the node's actual properties.
+// Only fields this app's nodes really carry are supported — no invented
+// "tag" field, since nodes don't have one.
+function parseQueryTokens(query: string): { tokens: { field: string; value: string; negate: boolean }[]; freeText: string[] } {
+  const tokens: { field: string; value: string; negate: boolean }[] = [];
+  const freeText: string[] = [];
+  for (const raw of query.trim().split(/\s+/).filter(Boolean)) {
+    const negate = raw.startsWith("-");
+    const body = negate ? raw.slice(1) : raw;
+    const colonIndex = body.indexOf(":");
+    if (colonIndex > 0) tokens.push({ field: body.slice(0, colonIndex).toLowerCase(), value: body.slice(colonIndex + 1).toLowerCase(), negate });
+    else if (body) freeText.push(body.toLowerCase());
+  }
+  return { tokens, freeText };
+}
+function nodeFieldValue(node: GraphOverview["nodes"][number], field: string): string {
+  if (field === "type") return node.node_type.toLowerCase();
+  if (field === "course") return String(node.properties?.course ?? "").toLowerCase();
+  if (field === "term") return String(node.properties?.term ?? "").toLowerCase();
+  if (field === "category") return String(node.properties?.category ?? "").toLowerCase();
+  return node.label.toLowerCase();
+}
+function nodeMatchesQuery(node: GraphOverview["nodes"][number], query: string): boolean {
+  const q = query.trim();
+  if (!q) return true;
+  const { tokens, freeText } = parseQueryTokens(q);
+  for (const token of tokens) {
+    const matches = nodeFieldValue(node, token.field).includes(token.value);
+    if (token.negate ? matches : !matches) return false;
+  }
+  const label = node.label.toLowerCase();
+  for (const term of freeText) if (!label.includes(term)) return false;
+  return true;
+}
+function queryLooksStructured(query: string): boolean { return /(^|\s)-?\w+:/.test(query); }
 
 function endpointId(value: string | { id: string }) { return typeof value === "string" ? value : value.id; }
 function readableRelation(value: string) { return value.replaceAll("_", " ").toLowerCase(); }
@@ -122,6 +181,10 @@ export default function KnowledgeGraph() {
   const [showNeighborLinks, setShowNeighborLinks] = useState(true);
   const [hiddenNodeIds, setHiddenNodeIds] = useState<Set<string>>(new Set());
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; nodeId: string } | null>(null);
+  const [settings, setSettings] = useState<DisplaySettings>(() => ({ ...DEFAULT_SETTINGS, ...loadPersisted<Partial<DisplaySettings>>("kg-settings", {}) }));
+  const [colorGroups, setColorGroups] = useState<ColorGroup[]>(() => loadPersisted<ColorGroup[]>("kg-color-groups", []));
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [groupsOpen, setGroupsOpen] = useState(false);
   const [hovered, setHovered] = useState<string | null>(null);
   const [hoveredEdge, setHoveredEdge] = useState<string | null>(null);
   const [view, setView] = useState<View>({ x: 0, y: 0, scale: 1 });
@@ -244,7 +307,10 @@ export default function KnowledgeGraph() {
     }
     return sizes;
   }, [graphNodes, graphEdges]);
-  const filteredNodes = useMemo(() => graphNodes.filter((node) => enabledTypes.includes(node.node_type) && !hiddenNodeIds.has(node.id)), [graphNodes, enabledTypes, hiddenNodeIds]);
+  const queryFilterActive = queryLooksStructured(search);
+  const filteredNodes = useMemo(() => graphNodes.filter((node) => enabledTypes.includes(node.node_type)
+    && !hiddenNodeIds.has(node.id)
+    && (!queryFilterActive || nodeMatchesQuery(node, search))), [graphNodes, enabledTypes, hiddenNodeIds, queryFilterActive, search]);
   const localLevels = useMemo(() => {
     if (!localMode || !selected) return new Map<string, number>();
     return localBfsLevels(selected.id, overview?.edges ?? [], localDepth, direction, includeEvidence, hiddenNodeIds);
@@ -277,9 +343,8 @@ export default function KnowledgeGraph() {
     return true;
   }), [overview, visibleIds, includeEvidence, localMode, selected, showNeighborLinks]);
   const searchResults = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    if (!q) return [];
-    return (overview?.nodes ?? []).filter((node) => node.label.toLowerCase().includes(q)).slice(0, 7);
+    if (!search.trim()) return [];
+    return (overview?.nodes ?? []).filter((node) => nodeMatchesQuery(node, search)).slice(0, 7);
   }, [overview, search]);
 
   // Seed stable positions and settle the subject graph with a small force layout.
@@ -425,6 +490,25 @@ export default function KnowledgeGraph() {
     return () => { window.removeEventListener("click", close); window.removeEventListener("scroll", close, true); };
   }, [contextMenu]);
 
+  // Debounced so dragging a slider doesn't hammer localStorage on every tick.
+  useEffect(() => {
+    const id = window.setTimeout(() => { try { window.localStorage.setItem("kg-settings", JSON.stringify(settings)); } catch { /* private mode / quota */ } }, 400);
+    return () => window.clearTimeout(id);
+  }, [settings]);
+  useEffect(() => {
+    const id = window.setTimeout(() => { try { window.localStorage.setItem("kg-color-groups", JSON.stringify(colorGroups)); } catch { /* private mode / quota */ } }, 400);
+    return () => window.clearTimeout(id);
+  }, [colorGroups]);
+  useEffect(() => {
+    if (!settingsOpen && !groupsOpen) return;
+    const close = (event: MouseEvent) => {
+      if ((event.target as HTMLElement | null)?.closest("[data-popover]")) return;
+      setSettingsOpen(false); setGroupsOpen(false);
+    };
+    window.addEventListener("click", close);
+    return () => window.removeEventListener("click", close);
+  }, [settingsOpen, groupsOpen]);
+
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
       const tag = (event.target as HTMLElement | null)?.tagName;
@@ -460,6 +544,21 @@ export default function KnowledgeGraph() {
     void openNode(id); focusNode(id);
   }
   function toggleType(type: string) { setEnabledTypes((current) => current.includes(type) ? current.filter((entry) => entry !== type) : [...current, type]); }
+  // First enabled group (in list order = priority) whose query matches wins;
+  // otherwise fall back to the built-in colour-by-type scheme.
+  function colorForNode(node: GraphOverview["nodes"][number]): string {
+    for (const group of colorGroups) if (group.enabled && group.query.trim() && nodeMatchesQuery(node, group.query)) return group.color;
+    return COLORS[node.node_type] ?? COLORS.document;
+  }
+  function addColorGroup() {
+    const id = typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : String(Date.now());
+    setColorGroups((current) => [...current, { id, name: `Group ${current.length + 1}`, query: "", color: "#7c5cff", enabled: true }]);
+    setGroupsOpen(true);
+  }
+  function updateColorGroup(id: string, patch: Partial<ColorGroup>) {
+    setColorGroups((current) => current.map((group) => group.id === id ? { ...group, ...patch } : group));
+  }
+  function removeColorGroup(id: string) { setColorGroups((current) => current.filter((group) => group.id !== id)); }
   function changeTopicScope(allTopics: boolean) {
     if (allTopics === showAllTopics) return;
     positionsRef.current = {};
@@ -501,7 +600,7 @@ export default function KnowledgeGraph() {
     const current = viewRef.current;
     for (let i = visibleNodes.length - 1; i >= 0; i -= 1) {
       const node = visibleNodes[i], p = positionsRef.current[node.id]; if (!p) continue;
-      if (Math.hypot(x - (p.x * current.scale + current.x), y - (p.y * current.scale + current.y)) <= Math.max(10, nodeRadius(degree.get(node.id) ?? 0) * current.scale + 4)) return node.id;
+      if (Math.hypot(x - (p.x * current.scale + current.x), y - (p.y * current.scale + current.y)) <= Math.max(10, nodeRadius(degree.get(node.id) ?? 0) * settings.nodeSizeScale * current.scale + 4)) return node.id;
     }
     return null;
   }
@@ -536,8 +635,43 @@ export default function KnowledgeGraph() {
         </div>
         <div className="flex items-center gap-2">
           <div className="relative">
-            <input className="w-64 rounded-lg border px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-violet-300" style={{ borderColor: "var(--color-border)", background: "var(--color-surface)" }} placeholder="Find a topic or source…" value={search} onChange={(event) => setSearch(event.target.value)} onKeyDown={(event) => event.key === "Enter" && searchResults[0] && chooseResult(searchResults[0].id)} />
-            {searchResults.length > 0 && <div className="absolute right-0 top-full z-20 mt-1 max-h-72 w-80 overflow-auto rounded-lg border p-1 shadow-xl" style={{ borderColor: "var(--color-border)", background: "var(--color-surface)" }}>{searchResults.map((node) => <button key={node.id} onClick={() => chooseResult(node.id)} className="flex w-full items-center justify-between gap-2 rounded-md px-2.5 py-2 text-left text-xs hover:bg-[var(--color-bg)]"><span className="truncate font-medium">{node.label}</span><span className="shrink-0" style={{ color: COLORS[node.node_type] }}>{node.node_type}</span></button>)}</div>}
+            <input className="w-72 rounded-lg border px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-violet-300" style={{ borderColor: "var(--color-border)", background: "var(--color-surface)" }} placeholder="Find a topic, or type:concept, course:…" value={search} onChange={(event) => setSearch(event.target.value)} onKeyDown={(event) => event.key === "Enter" && searchResults[0] && chooseResult(searchResults[0].id)} />
+            {searchResults.length > 0 && <div className="absolute right-0 top-full z-20 mt-1 max-h-72 w-80 overflow-auto rounded-lg border p-1 shadow-xl" style={{ borderColor: "var(--color-border)", background: "var(--color-surface)" }}>{searchResults.map((node) => <button key={node.id} onClick={() => chooseResult(node.id)} className="flex w-full items-center justify-between gap-2 rounded-md px-2.5 py-2 text-left text-xs hover:bg-[var(--color-bg)]"><span className="truncate font-medium">{node.label}</span><span className="shrink-0" style={{ color: colorForNode(node) }}>{node.node_type}</span></button>)}</div>}
+          </div>
+          <div className="relative" data-popover>
+            <button className="rounded-md border px-2.5 py-2 text-xs" style={{ borderColor: "var(--color-border)", background: groupsOpen ? "color-mix(in srgb, var(--color-primary) 12%, transparent)" : "var(--color-surface)" }} onClick={() => { setGroupsOpen((v) => !v); setSettingsOpen(false); }}>Groups{colorGroups.length > 0 ? ` · ${colorGroups.filter((g) => g.enabled).length}` : ""}</button>
+            {groupsOpen && (
+              <div className="absolute right-0 top-full z-30 mt-1 w-80 rounded-lg border bg-white p-3 text-xs shadow-xl" style={{ borderColor: "var(--color-border)" }}>
+                <div className="mb-2 flex items-center justify-between"><span className="font-semibold">Colour groups</span><button onClick={addColorGroup} className="text-[11px] underline" style={{ color: "var(--color-primary)" }}>+ Add group</button></div>
+                {colorGroups.length === 0 && <p style={{ color: "var(--color-text-muted)" }}>No custom groups yet. Add one to override node colours by a query, e.g. <code>type:case</code> or <code>course:marketing</code>.</p>}
+                <div className="max-h-64 space-y-2 overflow-y-auto">
+                  {colorGroups.map((group) => (
+                    <div key={group.id} className="flex items-center gap-1.5 rounded-md border p-1.5" style={{ borderColor: "var(--color-border)" }}>
+                      <input type="checkbox" checked={group.enabled} onChange={(event) => updateColorGroup(group.id, { enabled: event.target.checked })} />
+                      <input type="color" value={group.color} onChange={(event) => updateColorGroup(group.id, { color: event.target.value })} className="h-6 w-6 shrink-0 cursor-pointer rounded border-0 p-0" />
+                      <input value={group.name} onChange={(event) => updateColorGroup(group.id, { name: event.target.value })} placeholder="Name" className="w-16 rounded border px-1.5 py-1" style={{ borderColor: "var(--color-border)" }} />
+                      <input value={group.query} onChange={(event) => updateColorGroup(group.id, { query: event.target.value })} placeholder="type:case" className="min-w-0 flex-1 rounded border px-1.5 py-1" style={{ borderColor: "var(--color-border)" }} />
+                      <button onClick={() => removeColorGroup(group.id)} aria-label="Delete group" className="shrink-0 px-1" style={{ color: "var(--color-text-muted)" }}>×</button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+          <div className="relative" data-popover>
+            <button aria-label="Display settings" className="rounded-md border px-2.5 py-2 text-xs" style={{ borderColor: "var(--color-border)", background: settingsOpen ? "color-mix(in srgb, var(--color-primary) 12%, transparent)" : "var(--color-surface)" }} onClick={() => { setSettingsOpen((v) => !v); setGroupsOpen(false); }}>⚙ Settings</button>
+            {settingsOpen && (
+              <div className="absolute right-0 top-full z-30 mt-1 w-72 rounded-lg border bg-white p-3 text-xs shadow-xl" style={{ borderColor: "var(--color-border)" }}>
+                <div className="mb-2 flex items-center justify-between"><span className="font-semibold">Display settings</span><button onClick={() => setSettings(DEFAULT_SETTINGS)} className="text-[11px] underline" style={{ color: "var(--color-primary)" }}>Restore defaults</button></div>
+                <label className="mt-2 flex items-center justify-between gap-2">Node size<input type="range" min={0.5} max={2} step={0.1} value={settings.nodeSizeScale} onChange={(event) => setSettings((s) => ({ ...s, nodeSizeScale: Number(event.target.value) }))} /></label>
+                <label className="mt-2 flex items-center justify-between gap-2">Node opacity<input type="range" min={0.3} max={1} step={0.05} value={settings.nodeOpacity} onChange={(event) => setSettings((s) => ({ ...s, nodeOpacity: Number(event.target.value) }))} /></label>
+                <label className="mt-2 flex items-center justify-between gap-2">Edge thickness<input type="range" min={0.5} max={2.5} step={0.1} value={settings.edgeWidth} onChange={(event) => setSettings((s) => ({ ...s, edgeWidth: Number(event.target.value) }))} /></label>
+                <label className="mt-2 flex items-center justify-between gap-2">Edge opacity<input type="range" min={0.2} max={1} step={0.05} value={settings.edgeOpacity} onChange={(event) => setSettings((s) => ({ ...s, edgeOpacity: Number(event.target.value) }))} /></label>
+                <label className="mt-2 flex items-center justify-between gap-2">Label size<input type="range" min={0.6} max={1.6} step={0.1} value={settings.labelFontSize} onChange={(event) => setSettings((s) => ({ ...s, labelFontSize: Number(event.target.value) }))} /></label>
+                <label className="mt-2 flex items-center gap-2"><input type="checkbox" checked={settings.showLabels} onChange={(event) => setSettings((s) => ({ ...s, showLabels: event.target.checked }))} />Show labels</label>
+                <label className="mt-2 flex items-center gap-2"><input type="checkbox" checked={settings.showArrows} onChange={(event) => setSettings((s) => ({ ...s, showArrows: event.target.checked }))} />Show relationship arrows</label>
+              </div>
+            )}
           </div>
           {!PUBLIC_MODE && <button className="rounded-lg px-3 py-2 text-sm font-medium text-white disabled:opacity-60" style={{ background: "var(--color-primary)" }} onClick={startBuild} disabled={buildJob?.status === "running"}>{buildJob?.status === "running" ? `Building ${buildJob.processed}/${buildJob.total}` : "Rebuild graph"}</button>}
         </div>
@@ -563,7 +697,7 @@ export default function KnowledgeGraph() {
 
       <div className="flex min-h-0 flex-1 gap-3">
         <div ref={wrapRef} className="relative min-w-0 flex-1 overflow-hidden rounded-xl border" style={{ borderColor: "var(--color-border)", background: "#fbfbfd" }}>
-          {!overview ? <div className="flex h-full items-center justify-center text-sm" style={{ color: "var(--color-text-muted)" }}>Connecting to graph…</div> : visibleNodes.length === 0 ? <div className="flex h-full items-center justify-center text-sm" style={{ color: "var(--color-text-muted)" }}>No linked topics match these filters.</div> : <svg ref={svgRef} className="h-full w-full touch-none" viewBox={`0 0 ${canvasSize.width} ${canvasSize.height}`} onPointerDown={(event) => { const point = canvasPoint(event); pointerRef.current = { ...point, lastX: point.x, lastY: point.y, nodeId: hitNode(point.x, point.y), moved: false }; event.currentTarget.setPointerCapture(event.pointerId); }} onPointerMove={(event) => { const point = canvasPoint(event), drag = pointerRef.current; if (drag) { const dx = point.x - drag.lastX, dy = point.y - drag.lastY; if (Math.abs(point.x - drag.x) + Math.abs(point.y - drag.y) > 3) drag.moved = true; drag.lastX = point.x; drag.lastY = point.y; if (drag.moved) { if (drag.nodeId && positionsRef.current[drag.nodeId]) { const p = positionsRef.current[drag.nodeId]; const next = { ...positionsRef.current, [drag.nodeId]: { ...p, x: p.x + dx / viewRef.current.scale, y: p.y + dy / viewRef.current.scale } }; positionsRef.current = next; setPositions(next); } else setView((current) => ({ ...current, x: current.x + dx, y: current.y + dy })); } } else setHovered(hitNode(point.x, point.y)); }} onPointerUp={() => { const drag = pointerRef.current; pointerRef.current = null; if (!drag || drag.moved) return; if (!drag.nodeId) { if (selected) clearSelection(); return; } if (selected?.id === drag.nodeId) { clearSelection(); return; } void openNode(drag.nodeId); focusNode(drag.nodeId); }} onPointerCancel={() => { pointerRef.current = null; }}><g transform={`translate(${view.x} ${view.y}) scale(${view.scale})`}>{visibleEdges.map((edge) => { const aId = endpointId(edge.source), bId = endpointId(edge.target), a = positions[aId], b = positions[bId]; if (!a || !b) return null; const hot = hovered ? aId === hovered || bId === hovered : selected?.id === aId || selected?.id === bId; const midX = (a.x + b.x) / 2, midY = (a.y + b.y) / 2; return <g key={edge.id} opacity={hovered || selected ? hot ? 1 : 0.12 : 0.42}><line x1={a.x} y1={a.y} x2={b.x} y2={b.y} onPointerEnter={() => setHoveredEdge(edge.id)} onPointerLeave={() => setHoveredEdge(null)} stroke={hot ? "#6d55c7" : edge.relation === "RELATED_TO" ? "#aeb6c2" : "#7aa8ba"} strokeWidth={hot ? 1.8 : 0.9} markerEnd={edge.relation === "RELATED_TO" ? undefined : "url(#kg-arrow)"} />{hoveredEdge === edge.id && <text x={midX} y={midY} textAnchor="middle" fontSize={12 / view.scale} fill="#62558e" paintOrder="stroke" stroke="#fbfbfd" strokeWidth={4 / view.scale}>{readableRelation(edge.relation)}</text>}</g>; })}<defs><marker id="kg-arrow" viewBox="0 -4 8 8" refX="13" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,-4L8,0L0,4" fill="#7aa8ba" /></marker></defs>{visibleNodes.map((node) => { const point = positions[node.id]; if (!point) return null; const isActive = node.id === hovered || node.id === selected?.id, linked = !hovered && !selected || node.id === hovered || visibleEdges.some((edge) => (endpointId(edge.source) === (hovered ?? selected?.id) || endpointId(edge.target) === (hovered ?? selected?.id)) && (endpointId(edge.source) === node.id || endpointId(edge.target) === node.id)); const radius = nodeRadius(degree.get(node.id) ?? 0); const showLabel = localMode || !showAllTopics || view.scale > 1 || isActive || priorityLabels.has(node.id) || (componentSize.get(node.id) ?? 1) <= 6; return <g key={node.id} opacity={linked ? 1 : 0.17} onPointerEnter={() => setHovered(node.id)} onPointerLeave={() => setHovered(null)} onContextMenu={(event) => { event.preventDefault(); const rect = wrapRef.current?.getBoundingClientRect(); if (!rect) return; setContextMenu({ x: event.clientX - rect.left, y: event.clientY - rect.top, nodeId: node.id }); }} className="cursor-pointer"><title>{node.label}</title><circle cx={point.x} cy={point.y} r={radius} fill={COLORS[node.node_type] ?? COLORS.document} stroke={isActive ? "#403486" : "#ffffff"} strokeWidth={isActive ? 3 / view.scale : 1.5 / view.scale} /><circle cx={point.x} cy={point.y} r={Math.max(12, radius + 5)} fill="transparent" />{showLabel && <text x={point.x + radius + 5} y={point.y + 3} fontSize={(isActive ? 11 : 8) / view.scale} fill={isActive ? "#30284f" : "#454255"} paintOrder="stroke" stroke="#fbfbfd" strokeWidth={3 / view.scale}>{node.label.length > 40 ? `${node.label.slice(0, 37)}…` : node.label}</text>}</g>; })}</g></svg>}
+          {!overview ? <div className="flex h-full items-center justify-center text-sm" style={{ color: "var(--color-text-muted)" }}>Connecting to graph…</div> : visibleNodes.length === 0 ? <div className="flex h-full items-center justify-center text-sm" style={{ color: "var(--color-text-muted)" }}>No linked topics match these filters.</div> : <svg ref={svgRef} className="h-full w-full touch-none" viewBox={`0 0 ${canvasSize.width} ${canvasSize.height}`} onPointerDown={(event) => { const point = canvasPoint(event); pointerRef.current = { ...point, lastX: point.x, lastY: point.y, nodeId: hitNode(point.x, point.y), moved: false }; event.currentTarget.setPointerCapture(event.pointerId); }} onPointerMove={(event) => { const point = canvasPoint(event), drag = pointerRef.current; if (drag) { const dx = point.x - drag.lastX, dy = point.y - drag.lastY; if (Math.abs(point.x - drag.x) + Math.abs(point.y - drag.y) > 3) drag.moved = true; drag.lastX = point.x; drag.lastY = point.y; if (drag.moved) { if (drag.nodeId && positionsRef.current[drag.nodeId]) { const p = positionsRef.current[drag.nodeId]; const next = { ...positionsRef.current, [drag.nodeId]: { ...p, x: p.x + dx / viewRef.current.scale, y: p.y + dy / viewRef.current.scale } }; positionsRef.current = next; setPositions(next); } else setView((current) => ({ ...current, x: current.x + dx, y: current.y + dy })); } } else setHovered(hitNode(point.x, point.y)); }} onPointerUp={() => { const drag = pointerRef.current; pointerRef.current = null; if (!drag || drag.moved) return; if (!drag.nodeId) { if (selected) clearSelection(); return; } if (selected?.id === drag.nodeId) { clearSelection(); return; } void openNode(drag.nodeId); focusNode(drag.nodeId); }} onPointerCancel={() => { pointerRef.current = null; }}><g transform={`translate(${view.x} ${view.y}) scale(${view.scale})`}>{visibleEdges.map((edge) => { const aId = endpointId(edge.source), bId = endpointId(edge.target), a = positions[aId], b = positions[bId]; if (!a || !b) return null; const hot = hovered ? aId === hovered || bId === hovered : selected?.id === aId || selected?.id === bId; const midX = (a.x + b.x) / 2, midY = (a.y + b.y) / 2; return <g key={edge.id} opacity={(hovered || selected ? hot ? 1 : 0.12 : 0.42) * settings.edgeOpacity}><line x1={a.x} y1={a.y} x2={b.x} y2={b.y} onPointerEnter={() => setHoveredEdge(edge.id)} onPointerLeave={() => setHoveredEdge(null)} stroke={hot ? "#6d55c7" : edge.relation === "RELATED_TO" ? "#aeb6c2" : "#7aa8ba"} strokeWidth={(hot ? 1.8 : 0.9) * settings.edgeWidth} markerEnd={settings.showArrows && edge.relation !== "RELATED_TO" ? "url(#kg-arrow)" : undefined} />{hoveredEdge === edge.id && <text x={midX} y={midY} textAnchor="middle" fontSize={12 / view.scale} fill="#62558e" paintOrder="stroke" stroke="#fbfbfd" strokeWidth={4 / view.scale}>{readableRelation(edge.relation)}</text>}</g>; })}<defs><marker id="kg-arrow" viewBox="0 -4 8 8" refX="13" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,-4L8,0L0,4" fill="#7aa8ba" /></marker></defs>{visibleNodes.map((node) => { const point = positions[node.id]; if (!point) return null; const isActive = node.id === hovered || node.id === selected?.id, linked = !hovered && !selected || node.id === hovered || visibleEdges.some((edge) => (endpointId(edge.source) === (hovered ?? selected?.id) || endpointId(edge.target) === (hovered ?? selected?.id)) && (endpointId(edge.source) === node.id || endpointId(edge.target) === node.id)); const radius = Math.max(2, nodeRadius(degree.get(node.id) ?? 0) * settings.nodeSizeScale); const showLabel = settings.showLabels && (localMode || !showAllTopics || view.scale > 1 || isActive || priorityLabels.has(node.id) || (componentSize.get(node.id) ?? 1) <= 6); return <g key={node.id} opacity={(linked ? 1 : 0.17) * settings.nodeOpacity} onPointerEnter={() => setHovered(node.id)} onPointerLeave={() => setHovered(null)} onContextMenu={(event) => { event.preventDefault(); const rect = wrapRef.current?.getBoundingClientRect(); if (!rect) return; setContextMenu({ x: event.clientX - rect.left, y: event.clientY - rect.top, nodeId: node.id }); }} className="cursor-pointer"><title>{node.label}</title><circle cx={point.x} cy={point.y} r={radius} fill={colorForNode(node)} stroke={isActive ? "#403486" : "#ffffff"} strokeWidth={isActive ? 3 / view.scale : 1.5 / view.scale} /><circle cx={point.x} cy={point.y} r={Math.max(12, radius + 5)} fill="transparent" />{showLabel && <text x={point.x + radius + 5} y={point.y + 3} fontSize={(isActive ? 11 : 8) * settings.labelFontSize / view.scale} fill={isActive ? "#30284f" : "#454255"} paintOrder="stroke" stroke="#fbfbfd" strokeWidth={3 / view.scale}>{node.label.length > 40 ? `${node.label.slice(0, 37)}…` : node.label}</text>}</g>; })}</g></svg>}
           <div className="pointer-events-none absolute bottom-3 left-3 rounded-lg border px-3 py-2 text-[11px] shadow-sm" style={{ borderColor: "var(--color-border)", background: "rgba(255,255,255,.94)", color: "var(--color-text-muted)" }}>Drag to pan · drag a node to rearrange · scroll to zoom · right-click for options</div>
           {localMode && <button className="absolute right-3 top-3 rounded-lg border px-3 py-2 text-xs shadow-sm" style={{ borderColor: "var(--color-border)", background: "rgba(255,255,255,.94)" }} onClick={returnToFullGraph}>← Full graph</button>}
           {contextMenu && (() => {
@@ -595,7 +729,7 @@ export default function KnowledgeGraph() {
           <div className="mt-2 divide-y" style={{ borderColor: "var(--color-border)" }}>{selected.connections.map((connection) => <button key={connection.edge_id} onClick={() => { void openNode(connection.node.id); focusNode(connection.node.id); }} className="group block w-full py-3 text-left"><span className="block text-xs font-medium text-[var(--color-primary)] underline decoration-[var(--color-border)] underline-offset-2 group-hover:decoration-current">{connection.node.label}</span><span className="mt-1 block text-[11px] capitalize" style={{ color: "var(--color-text-muted)" }}>{connection.direction === "outgoing" ? "this node" : connection.node.label} {readableRelation(connection.relation)} {connection.direction === "outgoing" ? connection.node.label : "this node"}</span><span className="mt-1 block text-[10px]" style={{ color: COLORS[connection.node.node_type] }}>{connection.node.node_type}</span></button>)}{selected.connections.length === 0 && <p className="py-4 text-xs" style={{ color: "var(--color-text-muted)" }}>No linked notes found.</p>}</div>
         </aside>}
       </div>
-      <footer className="flex flex-wrap gap-x-4 gap-y-1 text-[11px]" style={{ color: "var(--color-text-muted)" }}>{DOMAIN_TYPES.map((type) => <span key={type} className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-full" style={{ background: COLORS[type] }} />{type}</span>)}<span className="ml-auto">+/− zoom · arrows pan · F focus selected · Esc deselect</span></footer>
+      <footer className="flex flex-wrap gap-x-4 gap-y-1 text-[11px]" style={{ color: "var(--color-text-muted)" }}>{DOMAIN_TYPES.map((type) => <span key={type} className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-full" style={{ background: COLORS[type] }} />{type}</span>)}{colorGroups.filter((group) => group.enabled && group.query.trim()).map((group) => <span key={group.id} className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-full" style={{ background: group.color }} />{group.name || group.query}</span>)}<span className="ml-auto">+/− zoom · arrows pan · F focus selected · Esc deselect</span></footer>
       {viewerDocument && <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-4" onClick={() => setViewerDocument(null)}><section className="flex h-[92vh] w-full max-w-7xl flex-col overflow-hidden rounded-xl border bg-white shadow-2xl" style={{ borderColor: "var(--color-border)" }} onClick={(event) => event.stopPropagation()}><header className="flex items-center justify-between gap-4 border-b px-5 py-3" style={{ borderColor: "var(--color-border)" }}><div className="min-w-0"><h2 className="truncate text-sm font-semibold">{viewerDocument.title}</h2><p className="mt-0.5 truncate text-xs" style={{ color: "var(--color-text-muted)" }}>{[viewerDocument.course, viewerDocument.term, viewerDocument.page_count ? `${viewerDocument.page_count} pages` : null].filter(Boolean).join(" · ")}</p></div><button onClick={() => setViewerDocument(null)} className="shrink-0 rounded-md border px-3 py-1.5 text-xs" style={{ borderColor: "var(--color-border)" }}>Close viewer</button></header>{viewerDocument.file_type.toLowerCase() === "pdf" && viewerDocument.file_url ? <iframe title={`PDF: ${viewerDocument.title}`} className="min-h-0 flex-1 bg-slate-100" src={`${BACKEND_ORIGIN}${viewerDocument.file_url}#toolbar=1&navpanes=0`} /> : <div className="min-h-0 flex-1 overflow-y-auto p-6">{!documentPreview ? <p className="text-sm" style={{ color: "var(--color-text-muted)" }}>Loading extracted notes…</p> : <div className="mx-auto max-w-3xl space-y-4">{documentPreview.chunks.map((chunk) => <article key={chunk.chunk_index} className="rounded-lg border p-4" style={{ borderColor: "var(--color-border)" }}><p className="mb-2 text-xs font-semibold" style={{ color: "var(--color-primary)" }}>{chunk.page_number ? `Page ${chunk.page_number}` : chunk.slide_number ? `Slide ${chunk.slide_number}` : documentPreview.title}</p><p className="whitespace-pre-wrap text-sm leading-6">{chunk.text}</p></article>)}</div>}</div>}</section></div>}
     </div>
   );
