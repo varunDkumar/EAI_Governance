@@ -20,10 +20,11 @@ const OVERVIEW_SUBJECT_TERMS = [
   ["financial analysis", "behavioral finance", "asset pricing", "capital market", "stock valuation", "investment", "capital structure", "derivatives", "portfolio", "cost of equity", "revenue recognition", "accrual accounting", "cash accounting"],
   ["pricing", "price discrimination", "premium pricing", "willingness to pay", "reservation price", "consumer surplus", "discount utilization", "cost classification", "cost of goods sold", "activity-based costing", "fixed cost", "variable cost"],
 ];
-const LOCAL_NEIGHBOR_LIMIT = 20;
+const LOCAL_DEPTH_NODE_CAP = 150;
 const BACKEND_ORIGIN = API_BASE;
 type Point = { x: number; y: number; vx: number; vy: number };
 type View = { x: number; y: number; scale: number };
+type Direction = "both" | "outgoing" | "incoming";
 
 function endpointId(value: string | { id: string }) { return typeof value === "string" ? value : value.id; }
 function readableRelation(value: string) { return value.replaceAll("_", " ").toLowerCase(); }
@@ -36,6 +37,36 @@ function fittedView(points: Record<string, Point>, width: number, height: number
   const graphWidth = Math.max(1, maxX - minX), graphHeight = Math.max(1, maxY - minY);
   const scale = Math.max(0.18, Math.min(maxScale, (width - 120) / graphWidth, (height - 100) / graphHeight));
   return { x: width / 2 - ((minX + maxX) / 2) * scale, y: height / 2 - ((minY + maxY) / 2) * scale, scale };
+}
+// BFS outward from a root node, honouring a direction filter (edges are
+// followed only in the requested direction relative to the node being
+// expanded from) and an evidence toggle (whether document/source edges count
+// as traversable alongside the domain relations). Returns each reached
+// node's hop distance from the root (0 = root itself), which both bounds the
+// visible set and drives the ring-by-depth layout below.
+function localBfsLevels(
+  rootId: string,
+  edges: GraphOverview["edges"],
+  depth: number,
+  direction: Direction,
+  includeEvidence: boolean,
+  hiddenIds: Set<string>,
+): Map<string, number> {
+  const levels = new Map<string, number>([[rootId, 0]]);
+  if (depth <= 0) return levels;
+  let frontier = new Set<string>([rootId]);
+  for (let level = 1; level <= depth && frontier.size; level += 1) {
+    const next = new Set<string>();
+    for (const edge of edges) {
+      if (!(DOMAIN_RELATIONS.has(edge.relation) || (includeEvidence && EVIDENCE_RELATIONS.has(edge.relation)))) continue;
+      const a = endpointId(edge.source), b = endpointId(edge.target);
+      if (frontier.has(a) && !levels.has(b) && !hiddenIds.has(b) && direction !== "incoming") next.add(b);
+      if (frontier.has(b) && !levels.has(a) && !hiddenIds.has(a) && direction !== "outgoing") next.add(a);
+    }
+    for (const id of next) levels.set(id, level);
+    frontier = next;
+  }
+  return levels;
 }
 function clusteredSeeds(nodes: GraphOverview["nodes"], edges: GraphOverview["edges"]): Record<string, Point> {
   const byId = new Map(nodes.map((node) => [node.id, node]));
@@ -86,6 +117,11 @@ export default function KnowledgeGraph() {
   const [showAllTopics, setShowAllTopics] = useState(false);
   const [localMode, setLocalMode] = useState(false);
   const [includeEvidence, setIncludeEvidence] = useState(false);
+  const [localDepth, setLocalDepth] = useState(1);
+  const [direction, setDirection] = useState<Direction>("both");
+  const [showNeighborLinks, setShowNeighborLinks] = useState(true);
+  const [hiddenNodeIds, setHiddenNodeIds] = useState<Set<string>>(new Set());
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; nodeId: string } | null>(null);
   const [hovered, setHovered] = useState<string | null>(null);
   const [hoveredEdge, setHoveredEdge] = useState<string | null>(null);
   const [view, setView] = useState<View>({ x: 0, y: 0, scale: 1 });
@@ -208,26 +244,38 @@ export default function KnowledgeGraph() {
     }
     return sizes;
   }, [graphNodes, graphEdges]);
-  const filteredNodes = useMemo(() => graphNodes.filter((node) => enabledTypes.includes(node.node_type)), [graphNodes, enabledTypes]);
+  const filteredNodes = useMemo(() => graphNodes.filter((node) => enabledTypes.includes(node.node_type) && !hiddenNodeIds.has(node.id)), [graphNodes, enabledTypes, hiddenNodeIds]);
+  const localLevels = useMemo(() => {
+    if (!localMode || !selected) return new Map<string, number>();
+    return localBfsLevels(selected.id, overview?.edges ?? [], localDepth, direction, includeEvidence, hiddenNodeIds);
+  }, [localMode, selected, overview, localDepth, direction, includeEvidence, hiddenNodeIds]);
   const visibleNodes = useMemo(() => {
     if (!localMode || !selected) return filteredNodes;
-    const nearby = new Set([selected.id]);
-    const candidates = new Map<string, number>();
-    for (const edge of overview?.edges ?? []) {
-      const a = endpointId(edge.source), b = endpointId(edge.target);
-      if (a === selected.id && (DOMAIN_RELATIONS.has(edge.relation) || includeEvidence && EVIDENCE_RELATIONS.has(edge.relation))) candidates.set(b, (candidates.get(b) ?? 0) + (edge.confidence ?? 1));
-      if (b === selected.id && (DOMAIN_RELATIONS.has(edge.relation) || includeEvidence && EVIDENCE_RELATIONS.has(edge.relation))) candidates.set(a, (candidates.get(a) ?? 0) + (edge.confidence ?? 1));
+    let candidateIds = [...localLevels.keys()];
+    // A hub node at depth 3-4 can reach hundreds of nodes; cap the rendered
+    // set (favouring closer hops, then better-connected nodes) rather than
+    // let the canvas render an unreadable, unresponsive mass.
+    if (candidateIds.length > LOCAL_DEPTH_NODE_CAP) {
+      const ranked = candidateIds
+        .filter((id) => id !== selected.id)
+        .sort((a, b) => (localLevels.get(a)! - localLevels.get(b)!) || ((degree.get(b) ?? 0) - (degree.get(a) ?? 0)));
+      candidateIds = [selected.id, ...ranked.slice(0, LOCAL_DEPTH_NODE_CAP - 1)];
     }
-    [...candidates].sort((a, b) => b[1] - a[1] || (degree.get(b[0]) ?? 0) - (degree.get(a[0]) ?? 0)).slice(0, LOCAL_NEIGHBOR_LIMIT).forEach(([id]) => nearby.add(id));
-    return (overview?.nodes ?? []).filter((node) => nearby.has(node.id)
+    const nearbySet = new Set(candidateIds);
+    return (overview?.nodes ?? []).filter((node) => nearbySet.has(node.id)
+      && !hiddenNodeIds.has(node.id)
       && (enabledTypes.includes(node.node_type) || node.id === selected.id || includeEvidence && node.node_type === "document"));
-  }, [localMode, selected, filteredNodes, overview, enabledTypes, includeEvidence, degree]);
+  }, [localMode, selected, filteredNodes, overview, enabledTypes, includeEvidence, hiddenNodeIds, localLevels, degree]);
   const visibleIds = useMemo(() => new Set(visibleNodes.map((node) => node.id)), [visibleNodes]);
   const visibleEdges = useMemo(() => (overview?.edges ?? []).filter((edge) => {
     const a = endpointId(edge.source), b = endpointId(edge.target);
-    return visibleIds.has(a) && visibleIds.has(b)
-      && (DOMAIN_RELATIONS.has(edge.relation) || includeEvidence && EVIDENCE_RELATIONS.has(edge.relation));
-  }), [overview, visibleIds, includeEvidence]);
+    if (!visibleIds.has(a) || !visibleIds.has(b)) return false;
+    if (!(DOMAIN_RELATIONS.has(edge.relation) || includeEvidence && EVIDENCE_RELATIONS.has(edge.relation))) return false;
+    // "Neighbour links" off: only show edges that touch the local graph's
+    // centre node, hiding cross-links between two neighbours of it.
+    if (localMode && selected && !showNeighborLinks) return a === selected.id || b === selected.id;
+    return true;
+  }), [overview, visibleIds, includeEvidence, localMode, selected, showNeighborLinks]);
   const searchResults = useMemo(() => {
     const q = search.trim().toLowerCase();
     if (!q) return [];
@@ -237,7 +285,13 @@ export default function KnowledgeGraph() {
   // Seed stable positions and settle the subject graph with a small force layout.
   // This leaves large document collections in the inspector instead of treating them as graph clutter.
   useEffect(() => {
-    if (!graphNodes.length) return;
+    // This settle loop only knows about the Overview/All-topics node set, not
+    // the local graph's neighbourhood — if it kept running (e.g. retriggered
+    // by a canvasSize change from the toolbar growing a row) while localMode
+    // is on, its periodic setPositions calls would overwrite the local
+    // graph's layout with positions for a completely different node set,
+    // silently vanishing any neighbour that isn't also an Overview node.
+    if (!graphNodes.length || localMode) return;
     const next: Record<string, Point> = {};
     const seeds = clusteredSeeds(graphNodes, graphEdges);
     graphNodes.forEach((node, index) => {
@@ -282,7 +336,7 @@ export default function KnowledgeGraph() {
     };
     frame = requestAnimationFrame(settle);
     return () => cancelAnimationFrame(frame);
-  }, [graphNodes, graphEdges, canvasSize.width, canvasSize.height]);
+  }, [graphNodes, graphEdges, canvasSize.width, canvasSize.height, localMode]);
 
   useEffect(() => {
     if (!localMode) {
@@ -297,19 +351,33 @@ export default function KnowledgeGraph() {
     if (!savedGlobalPositions.current) savedGlobalPositions.current = { ...positionsRef.current };
     const next = { ...savedGlobalPositions.current };
     const anchor = next[selected.id] ?? { x: 0, y: 0, vx: 0, vy: 0 };
-    visibleNodes.filter((node) => node.id !== selected.id).forEach((node, index) => {
-      const angle = index * 2.399963229728653;
-      const radius = 155 + Math.sqrt(index + 1) * 8;
-      next[node.id] = { x: anchor.x + Math.cos(angle) * radius, y: anchor.y + Math.sin(angle) * radius, vx: 0, vy: 0 };
+    // Place each hop on its own ring (depth 1 closest, depth 2 further out, …)
+    // so the depth slider reads visually, not just as a node-count change.
+    const byLevel = new Map<number, string[]>();
+    visibleNodes.filter((node) => node.id !== selected.id).forEach((node) => {
+      const level = localLevels.get(node.id) ?? 1;
+      if (!byLevel.has(level)) byLevel.set(level, []);
+      byLevel.get(level)!.push(node.id);
     });
+    for (const [level, ids] of byLevel) {
+      const radius = 130 + (level - 1) * 125;
+      ids.forEach((id, index) => {
+        const angle = (index * 2 * Math.PI) / ids.length + level * 0.35;
+        next[id] = { x: anchor.x + Math.cos(angle) * radius, y: anchor.y + Math.sin(angle) * radius, vx: 0, vy: 0 };
+      });
+    }
     positionsRef.current = next;
     setPositions(next);
     const localPoints = Object.fromEntries(visibleNodes.map((node) => [node.id, next[node.id]]).filter((entry): entry is [string, Point] => Boolean(entry[1])));
     setView(fittedView(localPoints, canvasSize.width, canvasSize.height, 5.5));
-  }, [localMode, selected?.id, visibleNodes.length, canvasSize.width, canvasSize.height]);
+  }, [localMode, selected?.id, visibleNodes.length, canvasSize.width, canvasSize.height, localLevels]);
 
   useEffect(() => {
-    if (!viewerDocument || viewerDocument.file_type.toLowerCase() === "pdf") { setDocumentPreview(null); return; }
+    // Match the render check below exactly: the iframe only shows when there
+    // IS a file_url. The public backend never sets one (no raw PDF serving),
+    // so a "pdf"-typed document there must still fall through to fetching
+    // extracted text, or its viewer is stuck on "Loading…" forever.
+    if (!viewerDocument || (viewerDocument.file_type.toLowerCase() === "pdf" && viewerDocument.file_url)) { setDocumentPreview(null); return; }
     let active = true;
     api.get<DocumentDetail>(`/repository/documents/${encodeURIComponent(viewerDocument.id)}`)
       .then((document) => { if (active) setDocumentPreview(document); })
@@ -341,7 +409,39 @@ export default function KnowledgeGraph() {
     finally { setSourcesLoading(false); }
   }, []);
 
+  // A copied "Copy link" URL (?node=<id>) opens straight to that node.
+  useEffect(() => {
+    if (!overview) return;
+    const nodeId = new URLSearchParams(window.location.search).get("node");
+    if (nodeId && nodeById.has(nodeId)) { void openNode(nodeId); focusNode(nodeId); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [overview !== null]);
 
+  useEffect(() => {
+    if (!contextMenu) return;
+    const close = () => setContextMenu(null);
+    window.addEventListener("click", close);
+    window.addEventListener("scroll", close, true);
+    return () => { window.removeEventListener("click", close); window.removeEventListener("scroll", close, true); };
+  }, [contextMenu]);
+
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      const tag = (event.target as HTMLElement | null)?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA") return;
+      if (event.key === "+" || event.key === "=") { zoomBy(1.25); event.preventDefault(); }
+      else if (event.key === "-" || event.key === "_") { zoomBy(0.8); event.preventDefault(); }
+      else if (event.key === "Escape") { if (contextMenu) setContextMenu(null); else clearSelection(); }
+      else if (event.key === "f" || event.key === "F") { if (selected) focusNode(selected.id); }
+      else if (event.key === "ArrowUp") setView((v) => ({ ...v, y: v.y + 40 }));
+      else if (event.key === "ArrowDown") setView((v) => ({ ...v, y: v.y - 40 }));
+      else if (event.key === "ArrowLeft") setView((v) => ({ ...v, x: v.x + 40 }));
+      else if (event.key === "ArrowRight") setView((v) => ({ ...v, x: v.x - 40 }));
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [contextMenu, selected?.id]);
 
   function startBuild() {
     api.post<{ job_id: string }>("/graph/build").then(({ job_id }) => {
@@ -426,7 +526,7 @@ export default function KnowledgeGraph() {
     return () => el.removeEventListener("wheel", handleWheel);
   }, [overview, visibleNodes.length === 0]);
 
-  const graphStats = overview ? `${visibleNodes.length.toLocaleString()} entities · ${visibleEdges.length.toLocaleString()} links · ${localMode ? "Nearby links" : showAllTopics ? "All linked topics" : "Overview of key linked topics"}` : "Loading graph…";
+  const graphStats = overview ? `${visibleNodes.length.toLocaleString()} entities · ${visibleEdges.length.toLocaleString()} links · ${localMode ? `Local graph · depth ${localDepth}` : showAllTopics ? "All linked topics" : "Overview of key linked topics"}` : "Loading graph…";
   return (
     <div className="flex h-full min-h-0 flex-col gap-3">
       <header className="flex flex-wrap items-start justify-between gap-3">
@@ -448,9 +548,13 @@ export default function KnowledgeGraph() {
           {!localMode && <div className="inline-flex rounded-lg border p-0.5" style={{ borderColor: "var(--color-border)", background: "var(--color-surface)" }}><button aria-pressed={!showAllTopics} onClick={() => changeTopicScope(false)} className="rounded-md px-2.5 py-1.5 text-xs" style={{ background: !showAllTopics ? "color-mix(in srgb, var(--color-primary) 12%, transparent)" : "transparent", color: !showAllTopics ? "var(--color-primary)" : "var(--color-text-muted)" }}>Overview · {overviewNodes.length}</button><button aria-pressed={showAllTopics} onClick={() => changeTopicScope(true)} className="rounded-md px-2.5 py-1.5 text-xs" style={{ background: showAllTopics ? "color-mix(in srgb, var(--color-primary) 12%, transparent)" : "transparent", color: showAllTopics ? "var(--color-primary)" : "var(--color-text-muted)" }}>All topics · {topicNodes.length}</button></div>}
           <div className="flex flex-wrap items-center gap-1.5">{DOMAIN_TYPES.map((type) => <button key={type} aria-pressed={enabledTypes.includes(type)} onClick={() => toggleType(type)} className="inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1.5 text-xs" style={{ borderColor: enabledTypes.includes(type) ? `${COLORS[type]}77` : "var(--color-border)", opacity: enabledTypes.includes(type) ? 1 : 0.5, background: "var(--color-surface)" }}><span className="h-2.5 w-2.5 rounded-full" style={{ background: COLORS[type] }} />{type}<span style={{ color: "var(--color-text-muted)" }}>{topicNodes.filter((node) => node.node_type === type).length}</span></button>)}</div>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           {localMode ? <button className="rounded-md border px-2.5 py-1.5 text-xs" style={{ borderColor: "var(--color-border)", color: "var(--color-primary)" }} onClick={returnToFullGraph}>Back to overview</button> : <button className="rounded-md border px-2.5 py-1.5 text-xs" style={{ borderColor: "var(--color-border)", background: selected ? "color-mix(in srgb, var(--color-primary) 12%, transparent)" : "var(--color-surface)", color: selected ? "var(--color-primary)" : "var(--color-text-muted)" }} onClick={() => selected && setLocalMode(true)} disabled={!selected}>Local graph</button>}
+          {localMode && <label className="flex items-center gap-1.5 text-xs" style={{ color: "var(--color-text-muted)" }} title="How many hops out from the centre node to show">Depth<input type="range" min={0} max={4} step={1} value={localDepth} onChange={(event) => setLocalDepth(Number(event.target.value))} className="w-20" /><span className="w-3 text-center font-medium" style={{ color: "var(--color-primary)" }}>{localDepth}</span></label>}
+          {localMode && <select value={direction} onChange={(event) => setDirection(event.target.value as Direction)} className="rounded-md border px-2 py-1.5 text-xs" style={{ borderColor: "var(--color-border)", background: "var(--color-surface)" }}><option value="both">Both directions</option><option value="outgoing">Outgoing only</option><option value="incoming">Incoming only</option></select>}
+          {localMode && <label className="flex items-center gap-1.5 text-xs" style={{ color: "var(--color-text-muted)" }}><input type="checkbox" checked={showNeighborLinks} onChange={(event) => setShowNeighborLinks(event.target.checked)} />Neighbour links</label>}
           {localMode && <label className="flex items-center gap-1.5 text-xs" style={{ color: "var(--color-text-muted)" }}><input type="checkbox" checked={includeEvidence} onChange={(event) => setIncludeEvidence(event.target.checked)} />Include documents</label>}
+          {hiddenNodeIds.size > 0 && <button className="rounded-md border px-2.5 py-1.5 text-xs" style={{ borderColor: "var(--color-border)" }} onClick={() => setHiddenNodeIds(new Set())}>{hiddenNodeIds.size} hidden · Show all</button>}
           <button aria-label="Zoom out" className="h-8 w-8 rounded-md border text-sm" style={{ borderColor: "var(--color-border)" }} onClick={() => zoomBy(0.8)}>−</button>
           <button aria-label="Zoom in" className="h-8 w-8 rounded-md border text-sm" style={{ borderColor: "var(--color-border)" }} onClick={() => zoomBy(1.25)}>+</button>
           <button className="rounded-md border px-2.5 py-1.5 text-xs" style={{ borderColor: "var(--color-border)" }} onClick={fitView}>Fit graph</button>
@@ -459,9 +563,24 @@ export default function KnowledgeGraph() {
 
       <div className="flex min-h-0 flex-1 gap-3">
         <div ref={wrapRef} className="relative min-w-0 flex-1 overflow-hidden rounded-xl border" style={{ borderColor: "var(--color-border)", background: "#fbfbfd" }}>
-          {!overview ? <div className="flex h-full items-center justify-center text-sm" style={{ color: "var(--color-text-muted)" }}>Connecting to graph…</div> : visibleNodes.length === 0 ? <div className="flex h-full items-center justify-center text-sm" style={{ color: "var(--color-text-muted)" }}>No linked topics match these filters.</div> : <svg ref={svgRef} className="h-full w-full touch-none" viewBox={`0 0 ${canvasSize.width} ${canvasSize.height}`} onPointerDown={(event) => { const point = canvasPoint(event); pointerRef.current = { ...point, lastX: point.x, lastY: point.y, nodeId: hitNode(point.x, point.y), moved: false }; event.currentTarget.setPointerCapture(event.pointerId); }} onPointerMove={(event) => { const point = canvasPoint(event), drag = pointerRef.current; if (drag) { const dx = point.x - drag.lastX, dy = point.y - drag.lastY; if (Math.abs(point.x - drag.x) + Math.abs(point.y - drag.y) > 3) drag.moved = true; drag.lastX = point.x; drag.lastY = point.y; if (drag.moved) { if (drag.nodeId && positionsRef.current[drag.nodeId]) { const p = positionsRef.current[drag.nodeId]; const next = { ...positionsRef.current, [drag.nodeId]: { ...p, x: p.x + dx / viewRef.current.scale, y: p.y + dy / viewRef.current.scale } }; positionsRef.current = next; setPositions(next); } else setView((current) => ({ ...current, x: current.x + dx, y: current.y + dy })); } } else setHovered(hitNode(point.x, point.y)); }} onPointerUp={() => { const drag = pointerRef.current; pointerRef.current = null; if (!drag || drag.moved) return; if (!drag.nodeId) { if (selected) clearSelection(); return; } if (selected?.id === drag.nodeId) { clearSelection(); return; } void openNode(drag.nodeId); focusNode(drag.nodeId); }} onPointerCancel={() => { pointerRef.current = null; }}><g transform={`translate(${view.x} ${view.y}) scale(${view.scale})`}>{visibleEdges.map((edge) => { const aId = endpointId(edge.source), bId = endpointId(edge.target), a = positions[aId], b = positions[bId]; if (!a || !b) return null; const hot = hovered ? aId === hovered || bId === hovered : selected?.id === aId || selected?.id === bId; const midX = (a.x + b.x) / 2, midY = (a.y + b.y) / 2; return <g key={edge.id} opacity={hovered || selected ? hot ? 1 : 0.12 : 0.42}><line x1={a.x} y1={a.y} x2={b.x} y2={b.y} onPointerEnter={() => setHoveredEdge(edge.id)} onPointerLeave={() => setHoveredEdge(null)} stroke={hot ? "#6d55c7" : edge.relation === "RELATED_TO" ? "#aeb6c2" : "#7aa8ba"} strokeWidth={hot ? 1.8 : 0.9} markerEnd={edge.relation === "RELATED_TO" ? undefined : "url(#kg-arrow)"} />{hoveredEdge === edge.id && <text x={midX} y={midY} textAnchor="middle" fontSize={12 / view.scale} fill="#62558e" paintOrder="stroke" stroke="#fbfbfd" strokeWidth={4 / view.scale}>{readableRelation(edge.relation)}</text>}</g>; })}<defs><marker id="kg-arrow" viewBox="0 -4 8 8" refX="13" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,-4L8,0L0,4" fill="#7aa8ba" /></marker></defs>{visibleNodes.map((node) => { const point = positions[node.id]; if (!point) return null; const isActive = node.id === hovered || node.id === selected?.id, linked = !hovered && !selected || node.id === hovered || visibleEdges.some((edge) => (endpointId(edge.source) === (hovered ?? selected?.id) || endpointId(edge.target) === (hovered ?? selected?.id)) && (endpointId(edge.source) === node.id || endpointId(edge.target) === node.id)); const radius = nodeRadius(degree.get(node.id) ?? 0); const showLabel = localMode || !showAllTopics || view.scale > 1 || isActive || priorityLabels.has(node.id) || (componentSize.get(node.id) ?? 1) <= 6; return <g key={node.id} opacity={linked ? 1 : 0.17} onPointerEnter={() => setHovered(node.id)} onPointerLeave={() => setHovered(null)} className="cursor-pointer"><title>{node.label}</title><circle cx={point.x} cy={point.y} r={radius} fill={COLORS[node.node_type] ?? COLORS.document} stroke={isActive ? "#403486" : "#ffffff"} strokeWidth={isActive ? 3 / view.scale : 1.5 / view.scale} /><circle cx={point.x} cy={point.y} r={Math.max(12, radius + 5)} fill="transparent" />{showLabel && <text x={point.x + radius + 5} y={point.y + 3} fontSize={(isActive ? 11 : 8) / view.scale} fill={isActive ? "#30284f" : "#454255"} paintOrder="stroke" stroke="#fbfbfd" strokeWidth={3 / view.scale}>{node.label.length > 40 ? `${node.label.slice(0, 37)}…` : node.label}</text>}</g>; })}</g></svg>}
-          <div className="pointer-events-none absolute bottom-3 left-3 rounded-lg border px-3 py-2 text-[11px] shadow-sm" style={{ borderColor: "var(--color-border)", background: "rgba(255,255,255,.94)", color: "var(--color-text-muted)" }}>Drag to pan · drag a node to rearrange · scroll to zoom · select a node to trace its links</div>
+          {!overview ? <div className="flex h-full items-center justify-center text-sm" style={{ color: "var(--color-text-muted)" }}>Connecting to graph…</div> : visibleNodes.length === 0 ? <div className="flex h-full items-center justify-center text-sm" style={{ color: "var(--color-text-muted)" }}>No linked topics match these filters.</div> : <svg ref={svgRef} className="h-full w-full touch-none" viewBox={`0 0 ${canvasSize.width} ${canvasSize.height}`} onPointerDown={(event) => { const point = canvasPoint(event); pointerRef.current = { ...point, lastX: point.x, lastY: point.y, nodeId: hitNode(point.x, point.y), moved: false }; event.currentTarget.setPointerCapture(event.pointerId); }} onPointerMove={(event) => { const point = canvasPoint(event), drag = pointerRef.current; if (drag) { const dx = point.x - drag.lastX, dy = point.y - drag.lastY; if (Math.abs(point.x - drag.x) + Math.abs(point.y - drag.y) > 3) drag.moved = true; drag.lastX = point.x; drag.lastY = point.y; if (drag.moved) { if (drag.nodeId && positionsRef.current[drag.nodeId]) { const p = positionsRef.current[drag.nodeId]; const next = { ...positionsRef.current, [drag.nodeId]: { ...p, x: p.x + dx / viewRef.current.scale, y: p.y + dy / viewRef.current.scale } }; positionsRef.current = next; setPositions(next); } else setView((current) => ({ ...current, x: current.x + dx, y: current.y + dy })); } } else setHovered(hitNode(point.x, point.y)); }} onPointerUp={() => { const drag = pointerRef.current; pointerRef.current = null; if (!drag || drag.moved) return; if (!drag.nodeId) { if (selected) clearSelection(); return; } if (selected?.id === drag.nodeId) { clearSelection(); return; } void openNode(drag.nodeId); focusNode(drag.nodeId); }} onPointerCancel={() => { pointerRef.current = null; }}><g transform={`translate(${view.x} ${view.y}) scale(${view.scale})`}>{visibleEdges.map((edge) => { const aId = endpointId(edge.source), bId = endpointId(edge.target), a = positions[aId], b = positions[bId]; if (!a || !b) return null; const hot = hovered ? aId === hovered || bId === hovered : selected?.id === aId || selected?.id === bId; const midX = (a.x + b.x) / 2, midY = (a.y + b.y) / 2; return <g key={edge.id} opacity={hovered || selected ? hot ? 1 : 0.12 : 0.42}><line x1={a.x} y1={a.y} x2={b.x} y2={b.y} onPointerEnter={() => setHoveredEdge(edge.id)} onPointerLeave={() => setHoveredEdge(null)} stroke={hot ? "#6d55c7" : edge.relation === "RELATED_TO" ? "#aeb6c2" : "#7aa8ba"} strokeWidth={hot ? 1.8 : 0.9} markerEnd={edge.relation === "RELATED_TO" ? undefined : "url(#kg-arrow)"} />{hoveredEdge === edge.id && <text x={midX} y={midY} textAnchor="middle" fontSize={12 / view.scale} fill="#62558e" paintOrder="stroke" stroke="#fbfbfd" strokeWidth={4 / view.scale}>{readableRelation(edge.relation)}</text>}</g>; })}<defs><marker id="kg-arrow" viewBox="0 -4 8 8" refX="13" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,-4L8,0L0,4" fill="#7aa8ba" /></marker></defs>{visibleNodes.map((node) => { const point = positions[node.id]; if (!point) return null; const isActive = node.id === hovered || node.id === selected?.id, linked = !hovered && !selected || node.id === hovered || visibleEdges.some((edge) => (endpointId(edge.source) === (hovered ?? selected?.id) || endpointId(edge.target) === (hovered ?? selected?.id)) && (endpointId(edge.source) === node.id || endpointId(edge.target) === node.id)); const radius = nodeRadius(degree.get(node.id) ?? 0); const showLabel = localMode || !showAllTopics || view.scale > 1 || isActive || priorityLabels.has(node.id) || (componentSize.get(node.id) ?? 1) <= 6; return <g key={node.id} opacity={linked ? 1 : 0.17} onPointerEnter={() => setHovered(node.id)} onPointerLeave={() => setHovered(null)} onContextMenu={(event) => { event.preventDefault(); const rect = wrapRef.current?.getBoundingClientRect(); if (!rect) return; setContextMenu({ x: event.clientX - rect.left, y: event.clientY - rect.top, nodeId: node.id }); }} className="cursor-pointer"><title>{node.label}</title><circle cx={point.x} cy={point.y} r={radius} fill={COLORS[node.node_type] ?? COLORS.document} stroke={isActive ? "#403486" : "#ffffff"} strokeWidth={isActive ? 3 / view.scale : 1.5 / view.scale} /><circle cx={point.x} cy={point.y} r={Math.max(12, radius + 5)} fill="transparent" />{showLabel && <text x={point.x + radius + 5} y={point.y + 3} fontSize={(isActive ? 11 : 8) / view.scale} fill={isActive ? "#30284f" : "#454255"} paintOrder="stroke" stroke="#fbfbfd" strokeWidth={3 / view.scale}>{node.label.length > 40 ? `${node.label.slice(0, 37)}…` : node.label}</text>}</g>; })}</g></svg>}
+          <div className="pointer-events-none absolute bottom-3 left-3 rounded-lg border px-3 py-2 text-[11px] shadow-sm" style={{ borderColor: "var(--color-border)", background: "rgba(255,255,255,.94)", color: "var(--color-text-muted)" }}>Drag to pan · drag a node to rearrange · scroll to zoom · right-click for options</div>
           {localMode && <button className="absolute right-3 top-3 rounded-lg border px-3 py-2 text-xs shadow-sm" style={{ borderColor: "var(--color-border)", background: "rgba(255,255,255,.94)" }} onClick={returnToFullGraph}>← Full graph</button>}
+          {contextMenu && (() => {
+            const menuNode = nodeById.get(contextMenu.nodeId);
+            if (!menuNode) return null;
+            const nodeUrl = `${window.location.origin}${window.location.pathname}?node=${encodeURIComponent(contextMenu.nodeId)}`;
+            return (
+              <div className="absolute z-30 w-52 rounded-lg border bg-white py-1 text-xs shadow-xl" style={{ left: Math.min(contextMenu.x, canvasSize.width - 210), top: Math.min(contextMenu.y, canvasSize.height - 190), borderColor: "var(--color-border)" }} onClick={(event) => event.stopPropagation()}>
+                <div className="truncate border-b px-3 py-1.5 font-medium" style={{ borderColor: "var(--color-border)" }}>{menuNode.label}</div>
+                <button className="block w-full px-3 py-1.5 text-left hover:bg-[var(--color-bg)]" onClick={() => { void openNode(contextMenu.nodeId); focusNode(contextMenu.nodeId); setContextMenu(null); }}>Show connections</button>
+                <button className="block w-full px-3 py-1.5 text-left hover:bg-[var(--color-bg)]" onClick={() => { void openNode(contextMenu.nodeId); setLocalMode(true); setContextMenu(null); }}>Open local graph</button>
+                <button className="block w-full px-3 py-1.5 text-left hover:bg-[var(--color-bg)]" onClick={() => { focusNode(contextMenu.nodeId); setContextMenu(null); }}>Focus on node</button>
+                <button className="block w-full px-3 py-1.5 text-left hover:bg-[var(--color-bg)]" onClick={() => { setHiddenNodeIds((current) => new Set(current).add(contextMenu.nodeId)); if (selected?.id === contextMenu.nodeId) clearSelection(); setContextMenu(null); }}>Hide node</button>
+                <button className="block w-full px-3 py-1.5 text-left hover:bg-[var(--color-bg)]" onClick={() => { navigator.clipboard?.writeText(nodeUrl).catch(() => {}); setContextMenu(null); }}>Copy link</button>
+              </div>
+            );
+          })()}
         </div>
         {selected && <aside className="w-80 shrink-0 overflow-y-auto rounded-xl border p-4" style={{ borderColor: "var(--color-border)", background: "var(--color-surface)" }}>
           <div className="flex items-start justify-between gap-2"><span className="rounded-full px-2 py-1 text-[11px] font-medium text-white" style={{ background: COLORS[selected.node_type] ?? COLORS.document }}>{selected.node_type}</span><button aria-label="Close details" className="text-sm" style={{ color: "var(--color-text-muted)" }} onClick={clearSelection}>×</button></div>
@@ -476,7 +595,7 @@ export default function KnowledgeGraph() {
           <div className="mt-2 divide-y" style={{ borderColor: "var(--color-border)" }}>{selected.connections.map((connection) => <button key={connection.edge_id} onClick={() => { void openNode(connection.node.id); focusNode(connection.node.id); }} className="group block w-full py-3 text-left"><span className="block text-xs font-medium text-[var(--color-primary)] underline decoration-[var(--color-border)] underline-offset-2 group-hover:decoration-current">{connection.node.label}</span><span className="mt-1 block text-[11px] capitalize" style={{ color: "var(--color-text-muted)" }}>{connection.direction === "outgoing" ? "this node" : connection.node.label} {readableRelation(connection.relation)} {connection.direction === "outgoing" ? connection.node.label : "this node"}</span><span className="mt-1 block text-[10px]" style={{ color: COLORS[connection.node.node_type] }}>{connection.node.node_type}</span></button>)}{selected.connections.length === 0 && <p className="py-4 text-xs" style={{ color: "var(--color-text-muted)" }}>No linked notes found.</p>}</div>
         </aside>}
       </div>
-      <footer className="flex flex-wrap gap-x-4 gap-y-1 text-[11px]" style={{ color: "var(--color-text-muted)" }}>{DOMAIN_TYPES.map((type) => <span key={type} className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-full" style={{ background: COLORS[type] }} />{type}</span>)}<span className="ml-auto">Node size shows connection count · select to reveal relationship labels</span></footer>
+      <footer className="flex flex-wrap gap-x-4 gap-y-1 text-[11px]" style={{ color: "var(--color-text-muted)" }}>{DOMAIN_TYPES.map((type) => <span key={type} className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-full" style={{ background: COLORS[type] }} />{type}</span>)}<span className="ml-auto">+/− zoom · arrows pan · F focus selected · Esc deselect</span></footer>
       {viewerDocument && <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-4" onClick={() => setViewerDocument(null)}><section className="flex h-[92vh] w-full max-w-7xl flex-col overflow-hidden rounded-xl border bg-white shadow-2xl" style={{ borderColor: "var(--color-border)" }} onClick={(event) => event.stopPropagation()}><header className="flex items-center justify-between gap-4 border-b px-5 py-3" style={{ borderColor: "var(--color-border)" }}><div className="min-w-0"><h2 className="truncate text-sm font-semibold">{viewerDocument.title}</h2><p className="mt-0.5 truncate text-xs" style={{ color: "var(--color-text-muted)" }}>{[viewerDocument.course, viewerDocument.term, viewerDocument.page_count ? `${viewerDocument.page_count} pages` : null].filter(Boolean).join(" · ")}</p></div><button onClick={() => setViewerDocument(null)} className="shrink-0 rounded-md border px-3 py-1.5 text-xs" style={{ borderColor: "var(--color-border)" }}>Close viewer</button></header>{viewerDocument.file_type.toLowerCase() === "pdf" && viewerDocument.file_url ? <iframe title={`PDF: ${viewerDocument.title}`} className="min-h-0 flex-1 bg-slate-100" src={`${BACKEND_ORIGIN}${viewerDocument.file_url}#toolbar=1&navpanes=0`} /> : <div className="min-h-0 flex-1 overflow-y-auto p-6">{!documentPreview ? <p className="text-sm" style={{ color: "var(--color-text-muted)" }}>Loading extracted notes…</p> : <div className="mx-auto max-w-3xl space-y-4">{documentPreview.chunks.map((chunk) => <article key={chunk.chunk_index} className="rounded-lg border p-4" style={{ borderColor: "var(--color-border)" }}><p className="mb-2 text-xs font-semibold" style={{ color: "var(--color-primary)" }}>{chunk.page_number ? `Page ${chunk.page_number}` : chunk.slide_number ? `Slide ${chunk.slide_number}` : documentPreview.title}</p><p className="whitespace-pre-wrap text-sm leading-6">{chunk.text}</p></article>)}</div>}</div>}</section></div>}
     </div>
   );
