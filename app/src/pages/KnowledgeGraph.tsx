@@ -6,20 +6,23 @@ import type { DocumentDetail, GraphBuildStatus, GraphNodeDetail, GraphOverview, 
 const PUBLIC_MODE = import.meta.env.VITE_PUBLIC_MODE === "true";
 
 const COLORS: Record<string, string> = {
-  concept: "#45b8e9", framework: "#a879e8", case: "#e9ad37", company: "#24bd91",
+  concept: "#45b8e9", framework: "#a879e8", case: "#e9ad37", company: "#24bd91", course: "#e85d9e",
   document: "#9aa3b2", agent: "#8795a8", conversation: "#34bfd2", memory: "#9577de", decision: "#df718f",
 };
-const DOMAIN_TYPES = ["concept", "framework", "case", "company"];
-const DOMAIN_RELATIONS = new Set(["RELATED_TO", "ILLUSTRATES", "STUDIES"]);
+// "course" nodes are a derived hub, not an extracted entity: diagnostics
+// showed the real concept/framework/case/company graph is genuinely
+// fragmented into 65 components (largest only 17 nodes) because the
+// extraction pipeline links concepts within a document excerpt, never
+// across documents. Rather than inventing semantic links, each
+// concept/framework/case/company is connected to the course(s) its source
+// document(s) belong to — verified metadata already on every document, not
+// a fabricated relationship — which collapses those 65 fragments to 30.
+const DOMAIN_TYPES = ["concept", "framework", "case", "company", "course"];
+const DOMAIN_RELATIONS = new Set(["RELATED_TO", "ILLUSTRATES", "STUDIES", "USED_IN_COURSE"]);
 const EVIDENCE_RELATIONS = new Set(["CONTAINS", "SOURCED_FROM", "DISCUSSES"]);
-const OVERVIEW_CORE_LIMIT = 18;
-const OVERVIEW_SUBJECT_LIMIT = 5;
-const OVERVIEW_SUBJECT_TERMS = [
-  ["economics", "econometrics", "economic growth", "gross domestic product", "gdp", "aggregate supply", "monetary and fiscal policy", "demand forecasting", "unit economics"],
-  ["marketing", "customer segmentation", "customer profiling", "brand", "market research", "market share", "product attribute", "product development", "product line", "consumer value", "marketing campaign", "willingness-to-pay"],
-  ["financial analysis", "behavioral finance", "asset pricing", "capital market", "stock valuation", "investment", "capital structure", "derivatives", "portfolio", "cost of equity", "revenue recognition", "accrual accounting", "cash accounting"],
-  ["pricing", "price discrimination", "premium pricing", "willingness to pay", "reservation price", "consumer surplus", "discount utilization", "cost classification", "cost of goods sold", "activity-based costing", "fixed cost", "variable cost"],
-];
+// How many nodes the default "Overview" shows: whole connected components,
+// largest first, until this budget is passed (never split a component).
+const OVERVIEW_NODE_BUDGET = 90;
 const LOCAL_DEPTH_NODE_CAP = 150;
 const BACKEND_ORIGIN = API_BASE;
 type Point = { x: number; y: number; vx: number; vy: number };
@@ -127,36 +130,51 @@ function localBfsLevels(
   }
   return levels;
 }
-function clusteredSeeds(nodes: GraphOverview["nodes"], edges: GraphOverview["edges"]): Record<string, Point> {
-  const byId = new Map(nodes.map((node) => [node.id, node]));
-  const neighbors = new Map(nodes.map((node) => [node.id, new Set<string>()]));
+// Shared BFS connected-components over a node/edge set, sorted largest
+// first. Used for the initial layout seed, the "largest components" default
+// view, and the connectivity diagnostics panel — one source of truth for
+// what "connected" means here, rather than three slightly different ones.
+function connectedComponents(nodeIds: string[], edges: GraphOverview["edges"]): string[][] {
+  const idSet = new Set(nodeIds);
+  const neighbors = new Map(nodeIds.map((id) => [id, new Set<string>()]));
   for (const edge of edges) {
     const a = endpointId(edge.source), b = endpointId(edge.target);
-    if (!byId.has(a) || !byId.has(b)) continue;
+    if (!idSet.has(a) || !idSet.has(b)) continue;
     neighbors.get(a)?.add(b); neighbors.get(b)?.add(a);
   }
   const seen = new Set<string>(), components: string[][] = [];
-  for (const node of nodes) {
-    if (seen.has(node.id)) continue;
-    const stack = [node.id], component: string[] = [];
-    seen.add(node.id);
+  for (const id of nodeIds) {
+    if (seen.has(id)) continue;
+    const stack = [id], component: string[] = [];
+    seen.add(id);
     while (stack.length) {
-      const id = stack.pop()!; component.push(id);
-      for (const next of neighbors.get(id) ?? []) if (!seen.has(next)) { seen.add(next); stack.push(next); }
+      const current = stack.pop()!; component.push(current);
+      for (const next of neighbors.get(current) ?? []) if (!seen.has(next)) { seen.add(next); stack.push(next); }
     }
     components.push(component);
   }
-  components.sort((a, b) => b.length - a.length || (byId.get(a[0])?.label ?? "").localeCompare(byId.get(b[0])?.label ?? ""));
-  const columns = Math.max(1, Math.ceil(Math.sqrt(components.length))), rows = Math.ceil(components.length / columns);
-  const cellWidth = 460, cellHeight = 400, centerX = (columns - 1) * cellWidth / 2, centerY = (rows - 1) * cellHeight / 2;
+  components.sort((a, b) => b.length - a.length);
+  return components;
+}
+const GOLDEN_ANGLE = 2.399963229728653;
+function clusteredSeeds(nodes: GraphOverview["nodes"], edges: GraphOverview["edges"]): Record<string, Point> {
+  const components = connectedComponents(nodes.map((node) => node.id), edges);
   const positions: Record<string, Point> = {};
   components.forEach((component, componentIndex) => {
-    const column = componentIndex % columns, row = Math.floor(componentIndex / columns);
-    const cx = column * cellWidth - centerX, cy = row * cellHeight - centerY;
-    const radius = Math.min(118, 38 + Math.sqrt(component.length) * 28);
+    // Pack component centres on a tight spiral, not a grid: the shared force
+    // simulation below (edge attraction, mutual repulsion, centre gravity)
+    // needs components to start close enough together that it can actually
+    // pull related mass together and let unrelated mass drift apart — a
+    // fixed, oversized grid cell per component (the previous approach)
+    // leaves every component marooned exactly where it started, since
+    // nothing but repulsion ever acts between two different components.
+    const centerRadius = 30 * Math.sqrt(componentIndex);
+    const centerAngle = componentIndex * GOLDEN_ANGLE;
+    const cx = Math.cos(centerAngle) * centerRadius, cy = Math.sin(centerAngle) * centerRadius;
+    const localRadius = Math.min(60, 14 + Math.sqrt(component.length) * 10);
     component.forEach((id, index) => {
-      const angle = component.length === 1 ? 0 : -Math.PI / 2 + index * 2 * Math.PI / component.length;
-      positions[id] = { x: cx + Math.cos(angle) * radius, y: cy + Math.sin(angle) * radius, vx: 0, vy: 0 };
+      const angle = component.length === 1 ? 0 : -Math.PI / 2 + (index * 2 * Math.PI) / component.length;
+      positions[id] = { x: cx + Math.cos(angle) * localRadius, y: cy + Math.sin(angle) * localRadius, vx: 0, vy: 0 };
     });
   });
   return positions;
@@ -185,6 +203,7 @@ export default function KnowledgeGraph() {
   const [colorGroups, setColorGroups] = useState<ColorGroup[]>(() => loadPersisted<ColorGroup[]>("kg-color-groups", []));
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [groupsOpen, setGroupsOpen] = useState(false);
+  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
   const [hovered, setHovered] = useState<string | null>(null);
   const [hoveredEdge, setHoveredEdge] = useState<string | null>(null);
   const [view, setView] = useState<View>({ x: 0, y: 0, scale: 1 });
@@ -239,40 +258,38 @@ export default function KnowledgeGraph() {
   // could ever be drawn for it — plotting it just reads as a random
   // disconnected dot. Drop it from the canvas (it's still reachable via search).
   const topicNodes = useMemo(() => domainNodesAll.filter((node) => (degree.get(node.id) ?? 0) > 0), [domainNodesAll, degree]);
+  // Computed once over the whole domain graph (independent of Overview/All
+  // topics/local-mode filters) so it answers "is this graph genuinely
+  // interconnected" rather than "how big is whatever's on screen right now".
+  const diagnostics = useMemo(() => {
+    const components = connectedComponents(topicNodes.map((node) => node.id), topicEdges);
+    const totalDegree = topicNodes.reduce((sum, node) => sum + (degree.get(node.id) ?? 0), 0);
+    const topDegree = [...topicNodes].sort((a, b) => (degree.get(b.id) ?? 0) - (degree.get(a.id) ?? 0)).slice(0, 5);
+    return {
+      totalNodes: domainNodesAll.length,
+      totalEdges: topicEdges.length,
+      componentCount: components.length,
+      largestComponent: components[0]?.length ?? 0,
+      isolatedNodes: domainNodesAll.length - topicNodes.length,
+      avgDegree: topicNodes.length ? totalDegree / topicNodes.length : 0,
+      topDegree,
+    };
+  }, [topicNodes, topicEdges, degree, domainNodesAll]);
+  // The default "Overview" used to hand-pick a sample via subject keyword
+  // lists, which is exactly what produced the "scattered unrelated pentagons"
+  // look: it seeded several unrelated subject pockets with no path between
+  // them. Showing the largest real connected components instead means the
+  // default view is genuinely one (or a few) coherent, explorable networks.
   const overviewNodes = useMemo(() => {
-    const byDegree = (a: GraphOverview["nodes"][number], b: GraphOverview["nodes"][number]) =>
-      (degree.get(b.id) ?? 0) - (degree.get(a.id) ?? 0) || a.label.localeCompare(b.label);
-    const core = topicNodes.filter((node) => !/machine learning/i.test(node.label)).sort(byDegree).slice(0, OVERVIEW_CORE_LIMIT);
-    const subjectTermSet = OVERVIEW_SUBJECT_TERMS.flat();
-    const subjectNodes = OVERVIEW_SUBJECT_TERMS.flatMap((terms) => {
-      const seeds = topicNodes
-        .filter((node) => terms.some((term) => node.label.toLowerCase().includes(term)))
-        .sort(byDegree)
-        .slice(0, OVERVIEW_SUBJECT_LIMIT);
-      const seedIds = new Set(seeds.map((node) => node.id));
-      const neighborIds = new Set<string>();
-      for (const edge of topicEdges) {
-        const a = endpointId(edge.source), b = endpointId(edge.target);
-        if (seedIds.has(a)) neighborIds.add(b);
-        if (seedIds.has(b)) neighborIds.add(a);
-      }
-      const neighbors = [...neighborIds]
-        .map((id) => topicNodes.find((node) => node.id === id))
-        .filter((node): node is GraphOverview["nodes"][number] => node !== undefined
-          && !/machine learning/i.test(node.label)
-          && subjectTermSet.some((term) => node.label.toLowerCase().includes(term)))
-        .sort(byDegree)
-        .slice(0, 4);
-      return [...seeds, ...neighbors];
-    });
-    const shortlist = [...new Map([...core, ...subjectNodes].map((node) => [node.id, node])).values()];
-    const shortlistIds = new Set(shortlist.map((node) => node.id)), linked = new Set<string>();
-    for (const edge of topicEdges) {
-      const a = endpointId(edge.source), b = endpointId(edge.target);
-      if (shortlistIds.has(a) && shortlistIds.has(b)) { linked.add(a); linked.add(b); }
+    const components = connectedComponents(topicNodes.map((node) => node.id), topicEdges);
+    const byId = new Map(topicNodes.map((node) => [node.id, node]));
+    const picked: GraphOverview["nodes"][number][] = [];
+    for (const component of components) {
+      if (picked.length >= OVERVIEW_NODE_BUDGET) break;
+      for (const id of component) { const node = byId.get(id); if (node) picked.push(node); }
     }
-    return shortlist.filter((node) => linked.has(node.id));
-  }, [topicNodes, topicEdges, degree]);
+    return picked;
+  }, [topicNodes, topicEdges]);
   const graphNodes = showAllTopics ? topicNodes : overviewNodes;
   const graphNodeIds = useMemo(() => new Set(graphNodes.map((node) => node.id)), [graphNodes]);
   const graphEdges = useMemo(() => topicEdges.filter((edge) => graphNodeIds.has(endpointId(edge.source)) && graphNodeIds.has(endpointId(edge.target))), [topicEdges, graphNodeIds]);
@@ -500,14 +517,14 @@ export default function KnowledgeGraph() {
     return () => window.clearTimeout(id);
   }, [colorGroups]);
   useEffect(() => {
-    if (!settingsOpen && !groupsOpen) return;
+    if (!settingsOpen && !groupsOpen && !diagnosticsOpen) return;
     const close = (event: MouseEvent) => {
       if ((event.target as HTMLElement | null)?.closest("[data-popover]")) return;
-      setSettingsOpen(false); setGroupsOpen(false);
+      setSettingsOpen(false); setGroupsOpen(false); setDiagnosticsOpen(false);
     };
     window.addEventListener("click", close);
     return () => window.removeEventListener("click", close);
-  }, [settingsOpen, groupsOpen]);
+  }, [settingsOpen, groupsOpen, diagnosticsOpen]);
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
@@ -639,7 +656,7 @@ export default function KnowledgeGraph() {
             {searchResults.length > 0 && <div className="absolute right-0 top-full z-20 mt-1 max-h-72 w-80 overflow-auto rounded-lg border p-1 shadow-xl" style={{ borderColor: "var(--color-border)", background: "var(--color-surface)" }}>{searchResults.map((node) => <button key={node.id} onClick={() => chooseResult(node.id)} className="flex w-full items-center justify-between gap-2 rounded-md px-2.5 py-2 text-left text-xs hover:bg-[var(--color-bg)]"><span className="truncate font-medium">{node.label}</span><span className="shrink-0" style={{ color: colorForNode(node) }}>{node.node_type}</span></button>)}</div>}
           </div>
           <div className="relative" data-popover>
-            <button className="rounded-md border px-2.5 py-2 text-xs" style={{ borderColor: "var(--color-border)", background: groupsOpen ? "color-mix(in srgb, var(--color-primary) 12%, transparent)" : "var(--color-surface)" }} onClick={() => { setGroupsOpen((v) => !v); setSettingsOpen(false); }}>Groups{colorGroups.length > 0 ? ` · ${colorGroups.filter((g) => g.enabled).length}` : ""}</button>
+            <button className="rounded-md border px-2.5 py-2 text-xs" style={{ borderColor: "var(--color-border)", background: groupsOpen ? "color-mix(in srgb, var(--color-primary) 12%, transparent)" : "var(--color-surface)" }} onClick={() => { setGroupsOpen((v) => !v); setSettingsOpen(false); setDiagnosticsOpen(false); }}>Groups{colorGroups.length > 0 ? ` · ${colorGroups.filter((g) => g.enabled).length}` : ""}</button>
             {groupsOpen && (
               <div className="absolute right-0 top-full z-30 mt-1 w-80 rounded-lg border bg-white p-3 text-xs shadow-xl" style={{ borderColor: "var(--color-border)" }}>
                 <div className="mb-2 flex items-center justify-between"><span className="font-semibold">Colour groups</span><button onClick={addColorGroup} className="text-[11px] underline" style={{ color: "var(--color-primary)" }}>+ Add group</button></div>
@@ -659,7 +676,7 @@ export default function KnowledgeGraph() {
             )}
           </div>
           <div className="relative" data-popover>
-            <button aria-label="Display settings" className="rounded-md border px-2.5 py-2 text-xs" style={{ borderColor: "var(--color-border)", background: settingsOpen ? "color-mix(in srgb, var(--color-primary) 12%, transparent)" : "var(--color-surface)" }} onClick={() => { setSettingsOpen((v) => !v); setGroupsOpen(false); }}>⚙ Settings</button>
+            <button aria-label="Display settings" className="rounded-md border px-2.5 py-2 text-xs" style={{ borderColor: "var(--color-border)", background: settingsOpen ? "color-mix(in srgb, var(--color-primary) 12%, transparent)" : "var(--color-surface)" }} onClick={() => { setSettingsOpen((v) => !v); setGroupsOpen(false); setDiagnosticsOpen(false); }}>⚙ Settings</button>
             {settingsOpen && (
               <div className="absolute right-0 top-full z-30 mt-1 w-72 rounded-lg border bg-white p-3 text-xs shadow-xl" style={{ borderColor: "var(--color-border)" }}>
                 <div className="mb-2 flex items-center justify-between"><span className="font-semibold">Display settings</span><button onClick={() => setSettings(DEFAULT_SETTINGS)} className="text-[11px] underline" style={{ color: "var(--color-primary)" }}>Restore defaults</button></div>
@@ -670,6 +687,25 @@ export default function KnowledgeGraph() {
                 <label className="mt-2 flex items-center justify-between gap-2">Label size<input type="range" min={0.6} max={1.6} step={0.1} value={settings.labelFontSize} onChange={(event) => setSettings((s) => ({ ...s, labelFontSize: Number(event.target.value) }))} /></label>
                 <label className="mt-2 flex items-center gap-2"><input type="checkbox" checked={settings.showLabels} onChange={(event) => setSettings((s) => ({ ...s, showLabels: event.target.checked }))} />Show labels</label>
                 <label className="mt-2 flex items-center gap-2"><input type="checkbox" checked={settings.showArrows} onChange={(event) => setSettings((s) => ({ ...s, showArrows: event.target.checked }))} />Show relationship arrows</label>
+              </div>
+            )}
+          </div>
+          <div className="relative" data-popover>
+            <button aria-label="Connectivity diagnostics" className="rounded-md border px-2.5 py-2 text-xs" style={{ borderColor: "var(--color-border)", background: diagnosticsOpen ? "color-mix(in srgb, var(--color-primary) 12%, transparent)" : "var(--color-surface)" }} onClick={() => { setDiagnosticsOpen((v) => !v); setGroupsOpen(false); setSettingsOpen(false); }}>Diagnostics</button>
+            {diagnosticsOpen && (
+              <div className="absolute right-0 top-full z-30 mt-1 w-72 rounded-lg border bg-white p-3 text-xs shadow-xl" style={{ borderColor: "var(--color-border)" }}>
+                <div className="mb-2 font-semibold">Graph connectivity</div>
+                <div className="grid grid-cols-2 gap-x-3 gap-y-1.5">
+                  <span style={{ color: "var(--color-text-muted)" }}>Total entities</span><span className="text-right font-medium">{diagnostics.totalNodes}</span>
+                  <span style={{ color: "var(--color-text-muted)" }}>Total links</span><span className="text-right font-medium">{diagnostics.totalEdges}</span>
+                  <span style={{ color: "var(--color-text-muted)" }}>Connected components</span><span className="text-right font-medium">{diagnostics.componentCount}</span>
+                  <span style={{ color: "var(--color-text-muted)" }}>Largest component</span><span className="text-right font-medium">{diagnostics.largestComponent}</span>
+                  <span style={{ color: "var(--color-text-muted)" }}>Isolated entities</span><span className="text-right font-medium">{diagnostics.isolatedNodes}</span>
+                  <span style={{ color: "var(--color-text-muted)" }}>Average degree</span><span className="text-right font-medium">{diagnostics.avgDegree.toFixed(1)}</span>
+                </div>
+                <div className="mt-3 font-semibold">Highest-degree entities</div>
+                <div className="mt-1 space-y-1">{diagnostics.topDegree.map((node) => <div key={node.id} className="flex items-center justify-between gap-2"><span className="truncate">{node.label}</span><span className="shrink-0" style={{ color: "var(--color-text-muted)" }}>{degree.get(node.id) ?? 0}</span></div>)}</div>
+                <p className="mt-3" style={{ color: "var(--color-text-muted)" }}>Pink "course" nodes are a derived bridge — not extracted content — connecting entities whose source documents belong to the same course.</p>
               </div>
             )}
           </div>
