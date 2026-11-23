@@ -1,16 +1,22 @@
-"""Minimal public-facing backend: Governance Simulator only.
+"""Minimal public-facing backend: Governance Simulator + a read-only Knowledge
+Graph demo.
 
-Deliberately does NOT import anything from the Memory Intelligence stack
-(repository/chat/memory/graph routers, fastembed, chromadb, pymupdf, the LLM
-provider factory) — that stack serves the user's real academic corpus, which
-is desktop-only and never deployed here. The Governance Simulator needs none
-of it: it's fully deterministic, synthetic, hand-authored data (see
-governance_simulator/hospital_data.py) with zero LLM calls.
+Deliberately does NOT import the live Memory Intelligence stack (the ingest/
+chat pipeline, fastembed, chromadb, pymupdf, the LLM provider factory, or any
+Moodle-corpus filesystem access) — that stack is desktop-only. The Knowledge
+Graph here is served from a pre-built, static snapshot
+(`public_graph_seed/graph_corpus.sqlite3`, see `api/public_graph.py` and
+`scripts/export_public_graph.py`) with no rebuild/import path and no raw PDF
+file serving, so none of the heavy ingestion dependencies are needed. The
+Governance Simulator is unrelated: fully deterministic, synthetic,
+hand-authored data (see governance_simulator/hospital_data.py) with zero LLM
+calls.
 
 This keeps the public deployment's dependency list (see
 requirements-public.txt) and memory footprint small enough for a free-tier
-host, and — just as importantly — means the corpus code path is physically
-absent from what's running publicly, not just unlinked from the UI.
+host, and — just as importantly — means the corpus ingestion/LLM code paths
+are physically absent from what's running publicly, not just unlinked from
+the UI.
 """
 
 import os
@@ -19,6 +25,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from api.public_graph import router as public_graph_router
 from api.simulator import router as simulator_router
 from db.session import Base, engine
 
@@ -38,6 +45,7 @@ app.add_middleware(
 )
 
 app.include_router(simulator_router)
+app.include_router(public_graph_router)
 
 
 @app.on_event("startup")

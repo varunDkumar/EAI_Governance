@@ -1,0 +1,19 @@
+import { Link } from "react-router-dom";
+
+// Public web deployment chooser — same layout/style as the desktop app's
+// Home.tsx, trimmed to the two products that are actually deployed publicly
+// (Memory Intelligence's chat/workspace stays desktop-only; only its
+// Knowledge Graph view is public, see api/public_graph.py).
+const products = [
+  { eyebrow: "GOVERNANCE SIMULATOR", title: "See governance change the outcome.", description: "Follow a synthetic hospital patient through 4 visits and 8 AI agents, then compare identity, coherence, continuity and exclusivity with and without CNE.", route: "/governance-simulator/comparison", action: "Open Governance Simulator", icon: "⛨", details: ["Full patient journey, two clinical episodes", "Coherence · Narrative Continuity · Exclusivity", "Live, verifiable audit trail"] },
+  { eyebrow: "KNOWLEDGE GRAPH", title: "Explore a real academic knowledge graph.", description: "Browse concepts, frameworks, cases and companies drawn from a real IIM Ahmedabad MBA course corpus, linked and explorable node by node.", route: "/graph", action: "Open Knowledge Graph", icon: "◈", details: ["1,500+ concepts, frameworks and cases", "Click any node to trace its connections", "Full extracted text per source document"] },
+];
+
+export default function PublicHome() {
+  return <div className="min-h-full bg-[var(--color-bg)] px-8 py-8 md:px-12 md:py-12">
+    <header className="mx-auto flex max-w-6xl items-center justify-between"><div><div className="text-sm font-semibold text-[var(--color-primary)]">AGENT TRUST FABRIC</div><div className="mt-1 text-xs text-[var(--color-text-muted)]">Two product experiences · one trusted workspace</div></div><span className="rounded-full border border-[var(--color-border)] bg-white px-3 py-1.5 text-xs text-[var(--color-text-muted)]">Public demo</span></header>
+    <section className="mx-auto max-w-6xl pb-8 pt-16 md:pt-24"><p className="text-sm font-semibold uppercase tracking-[.16em] text-[var(--color-primary)]">Choose a product</p><h1 className="mt-3 max-w-3xl text-4xl font-semibold tracking-tight md:text-5xl">Memory for what agents know. Governance for what they do.</h1><p className="mt-5 max-w-2xl text-lg leading-7 text-[var(--color-text-muted)]">Explore a real academic knowledge graph, or see how the CNE protocol changes an AI agent's response in a synthetic hospital case.</p></section>
+    <section className="mx-auto grid max-w-6xl gap-5 md:grid-cols-2">{products.map((p, i) => <article key={p.route} className={`group flex min-h-[390px] flex-col rounded-2xl border bg-white p-7 shadow-sm transition hover:-translate-y-1 hover:shadow-lg ${i === 1 ? "border-violet-200" : "border-[var(--color-border)]"}`}><div className="flex items-start justify-between"><span className={`grid size-12 place-items-center rounded-xl text-2xl ${i ? "bg-violet-100 text-violet-800" : "bg-slate-100 text-slate-700"}`}>{p.icon}</span><span className="rounded-full bg-slate-50 px-3 py-1 text-[10px] font-semibold tracking-[.12em] text-slate-500">{p.eyebrow}</span></div><h2 className="mt-8 text-2xl font-semibold tracking-tight">{p.title}</h2><p className="mt-3 max-w-lg leading-6 text-[var(--color-text-muted)]">{p.description}</p><ul className="mt-6 grid gap-2 text-sm text-slate-700">{p.details.map(d => <li key={d} className="flex items-center gap-2"><span className="text-violet-600">✓</span>{d}</li>)}</ul><div className="mt-auto pt-8"><Link className="inline-flex items-center gap-2 rounded-lg bg-[var(--color-primary)] px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-[var(--color-primary-hover)]" to={p.route}>{p.action}<span aria-hidden>→</span></Link></div></article>)}</section>
+    <footer className="mx-auto mt-8 max-w-6xl text-xs text-[var(--color-text-muted)]">Simulator content is synthetic and illustrative; it is not clinical advice. The knowledge graph is read-only and reflects a real course corpus.</footer>
+  </div>;
+}

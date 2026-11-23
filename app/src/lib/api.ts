@@ -1,7 +1,7 @@
 // The desktop build (Tauri) always talks to its local sidecar backend. The
 // public web build (deployed separately) points this at the hosted backend
 // via a build-time env var instead — see VITE_API_BASE in .env.production.
-const API_BASE = import.meta.env.VITE_API_BASE ?? "http://127.0.0.1:8756";
+export const API_BASE = import.meta.env.VITE_API_BASE ?? "http://127.0.0.1:8756";
 
 export class ApiError extends Error {
   status: number;

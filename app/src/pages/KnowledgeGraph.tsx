@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api } from "../lib/api";
+import { API_BASE, api } from "../lib/api";
 import { useRetryingEffect } from "../lib/useRetryingEffect";
 import type { DocumentDetail, GraphBuildStatus, GraphNodeDetail, GraphOverview, GraphSourceDocument } from "../lib/types";
+
+const PUBLIC_MODE = import.meta.env.VITE_PUBLIC_MODE === "true";
 
 const COLORS: Record<string, string> = {
   concept: "#45b8e9", framework: "#a879e8", case: "#e9ad37", company: "#24bd91",
@@ -19,7 +21,7 @@ const OVERVIEW_SUBJECT_TERMS = [
   ["pricing", "price discrimination", "premium pricing", "willingness to pay", "reservation price", "consumer surplus", "discount utilization", "cost classification", "cost of goods sold", "activity-based costing", "fixed cost", "variable cost"],
 ];
 const LOCAL_NEIGHBOR_LIMIT = 20;
-const BACKEND_ORIGIN = "http://127.0.0.1:8756";
+const BACKEND_ORIGIN = API_BASE;
 type Point = { x: number; y: number; vx: number; vy: number };
 type View = { x: number; y: number; scale: number };
 
@@ -437,7 +439,7 @@ export default function KnowledgeGraph() {
             <input className="w-64 rounded-lg border px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-violet-300" style={{ borderColor: "var(--color-border)", background: "var(--color-surface)" }} placeholder="Find a topic or source…" value={search} onChange={(event) => setSearch(event.target.value)} onKeyDown={(event) => event.key === "Enter" && searchResults[0] && chooseResult(searchResults[0].id)} />
             {searchResults.length > 0 && <div className="absolute right-0 top-full z-20 mt-1 max-h-72 w-80 overflow-auto rounded-lg border p-1 shadow-xl" style={{ borderColor: "var(--color-border)", background: "var(--color-surface)" }}>{searchResults.map((node) => <button key={node.id} onClick={() => chooseResult(node.id)} className="flex w-full items-center justify-between gap-2 rounded-md px-2.5 py-2 text-left text-xs hover:bg-[var(--color-bg)]"><span className="truncate font-medium">{node.label}</span><span className="shrink-0" style={{ color: COLORS[node.node_type] }}>{node.node_type}</span></button>)}</div>}
           </div>
-          <button className="rounded-lg px-3 py-2 text-sm font-medium text-white disabled:opacity-60" style={{ background: "var(--color-primary)" }} onClick={startBuild} disabled={buildJob?.status === "running"}>{buildJob?.status === "running" ? `Building ${buildJob.processed}/${buildJob.total}` : "Rebuild graph"}</button>
+          {!PUBLIC_MODE && <button className="rounded-lg px-3 py-2 text-sm font-medium text-white disabled:opacity-60" style={{ background: "var(--color-primary)" }} onClick={startBuild} disabled={buildJob?.status === "running"}>{buildJob?.status === "running" ? `Building ${buildJob.processed}/${buildJob.total}` : "Rebuild graph"}</button>}
         </div>
       </header>
 

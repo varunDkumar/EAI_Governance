@@ -1,4 +1,4 @@
-import { Navigate, Route, Routes, useLocation } from "react-router-dom";
+import { Link, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import Sidebar from "./components/Sidebar";
 import Overview from "./pages/Overview";
 import Workspace from "./pages/Workspace";
@@ -11,20 +11,37 @@ import ApprovalCentre from "./pages/ApprovalCentre";
 import AuditLog from "./pages/AuditLog";
 import Settings from "./pages/Settings";
 import Home from "./pages/Home";
+import PublicHome from "./pages/PublicHome";
 import GovernanceSimulator from "./pages/GovernanceSimulator";
 
-// The public web deployment only ever serves the Governance Simulator (fully
-// synthetic data) — Memory Intelligence sits over the user's real academic
-// corpus, which is desktop-only and never shipped to the public backend.
+// The public web deployment only ever serves two products: the Governance
+// Simulator (fully synthetic data) and a read-only Knowledge Graph view
+// (see backend/api/public_graph.py). The rest of Memory Intelligence — chat,
+// memory, agents, governance centre — sits over the user's live corpus and
+// stays desktop-only.
 const PUBLIC_MODE = import.meta.env.VITE_PUBLIC_MODE === "true";
+
+function PublicGraphShell() {
+  return (
+    <div className="flex h-screen w-screen flex-col overflow-hidden">
+      <div className="flex items-center justify-between border-b bg-white px-7 py-2.5" style={{ borderColor: "var(--color-border)" }}>
+        <Link to="/" className="text-xs font-semibold" style={{ color: "var(--color-primary)" }}>← All products</Link>
+        <div className="text-[11px]" style={{ color: "var(--color-text-muted)" }}>IIM Ahmedabad MBA course corpus · read-only public demo</div>
+      </div>
+      <main className="min-h-0 flex-1 overflow-y-auto px-8 py-6">
+        <KnowledgeGraph />
+      </main>
+    </div>
+  );
+}
 
 function App() {
   const location = useLocation();
   if (PUBLIC_MODE) {
-    if (!location.pathname.startsWith("/governance-simulator")) {
-      return <Navigate to="/governance-simulator/comparison" replace />;
-    }
-    return <GovernanceSimulator />;
+    if (location.pathname === "/") return <PublicHome />;
+    if (location.pathname.startsWith("/governance-simulator")) return <GovernanceSimulator />;
+    if (location.pathname.startsWith("/graph")) return <PublicGraphShell />;
+    return <Navigate to="/" replace />;
   }
   if (location.pathname === "/") return <Home />;
   if (location.pathname.startsWith("/governance-simulator")) return <GovernanceSimulator />;
